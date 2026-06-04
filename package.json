@@ -1,0 +1,83 @@
+{
+  "name": "penstock",
+  "version": "0.1.0",
+  "description": "Composable, testable backend workflows for Node.js — use-cases, pipelines, steps, and engines, with first-class reverse-order rollback. Zero runtime dependencies.",
+  "keywords": [
+    "orchestration",
+    "pipeline",
+    "workflow",
+    "saga",
+    "compensation",
+    "rollback",
+    "steps",
+    "backend",
+    "typescript"
+  ],
+  "license": "MIT",
+  "author": "Muhammad Zaier Ahmad <zaier8284@gmail.com>",
+  "homepage": "https://github.com/zaier84/penstock#readme",
+  "bugs": {
+    "url": "https://github.com/zaier84/penstock/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zaier84/penstock.git"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "audit": "npm audit --audit-level=high",
+    "check:exports": "publint && attw --pack",
+    "prepublishOnly": "npm run lint && npm run format:check && npm run typecheck && npm run test && npm run build && npm run check:exports",
+    "example:order": "tsx examples/order-processing.ts",
+    "example:onboarding": "tsx examples/user-onboarding.ts"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.3",
+    "@vitest/coverage-v8": "^4.1.8",
+    "eslint": "^10.4.1",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.3",
+    "publint": "^0.3.21",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.60.1",
+    "vitest": "^4.1.8"
+  }
+}

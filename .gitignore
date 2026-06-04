@@ -1,0 +1,11 @@
+node_modules
+dist
+coverage
+*.log
+.DS_Store
+.env*
+*.tgz
+
+# Build/process docs kept local — not part of the library repository
+BUILD_SPEC.md
+WORKFLOW.md
