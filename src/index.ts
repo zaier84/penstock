@@ -1,6 +1,26 @@
-// Public API surface for penstock.
-//
-// Populated incrementally across the build phases (Step, Pipeline, Engine,
-// UseCase, context, logger, errors). This placeholder keeps the package
-// buildable and the dual ESM/CJS exports verifiable until Phase 1 begins.
-export {};
+// Public API surface for penstock — the complete set of exports (§3).
+
+export { Step } from './step';
+export { Pipeline } from './pipeline';
+export type { ExecuteOptions } from './pipeline';
+export { Engine, registerEngine, clearEngines } from './engine';
+export { UseCase } from './usecase';
+export type { UseCaseResult } from './usecase';
+export { noopLogger, consoleLogger } from './logger';
+export type { Logger } from './logger';
+export { PenstockError, PipelineError, StepError, UsageError } from './errors';
+export type { BaseContext } from './context';
+export type {
+  AfterHook,
+  BeforeHook,
+  EngineAccessor,
+  EngineMethods,
+  ErrorHook,
+  GuardFn,
+  Result,
+  RunFn,
+  StepOptions,
+  StepReport,
+  StepStatus,
+  UndoFn,
+} from './types';
