@@ -1,5 +1,7 @@
 import type { BaseContext } from './context';
 import { createContext } from './context';
+import { createEngineAccessor } from './engine';
+import type { Engine } from './engine';
 import { PipelineError, StepError, UsageError } from './errors';
 import { assertSafeName } from './internal';
 import type { Logger } from './logger';
@@ -8,15 +10,15 @@ import { Step } from './step';
 import type {
   AfterHook,
   BeforeHook,
-  EngineAccessor,
   ErrorHook,
   Result,
   StepReport,
 } from './types';
 
 /**
- * Options for {@link Pipeline.execute} (§3.2). `logger` and `throwOnError`
- * (§1.7) are honored; `dryRun` (§1.2) is wired in Phase 5.
+ * Options for {@link Pipeline.execute} (§3.2). `logger` selects the run logger
+ * (default no-op), `throwOnError` rethrows a failure as a {@link PipelineError}
+ * (§1.7), and `dryRun` switches to planning instead of execution (§1.2).
  */
 export interface ExecuteOptions {
   throwOnError?: boolean;
@@ -45,13 +47,17 @@ interface Completed<TContext extends BaseContext> {
  * {@link Pipeline.execute}-local variables, so a pipeline is safe to `execute`
  * repeatedly and concurrently (§3.2 re-entrancy).
  *
- * Engines (§3.5) and dry-run (§1.2) arrive in Phase 5.
+ * Pipeline-scoped engines (§3.5) shadow the global registry, and `dryRun`
+ * planning is available via {@link Pipeline.execute} (§1.2).
  */
 export class Pipeline<TContext extends BaseContext = BaseContext> {
   readonly name: string;
   private readonly steps: Step<TContext>[] = [];
   // Step-name dedup uses a Set, never a user-keyed plain object (§1.10).
   private readonly stepNames = new Set<string>();
+  // Pipeline-scoped engines, Map-backed for the same reason (§1.10). Build-time
+  // config (set via useEngine), read-only during execute — not per-run state.
+  private readonly engines = new Map<string, Engine>();
   private readonly beforeHooks: BeforeHook<TContext>[] = [];
   private readonly afterHooks: AfterHook<TContext>[] = [];
   private readonly errorHooks: ErrorHook<TContext>[] = [];
@@ -99,25 +105,40 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   }
 
   /**
+   * Registers an engine scoped to this pipeline; during resolution it shadows a
+   * global engine of the same name (§3.5). The scoped store is a `Map`, never a
+   * user-keyed plain object (§1.10). Chainable.
+   */
+  useEngine(engine: Engine): this {
+    this.engines.set(engine.name, engine);
+    return this;
+  }
+
+  /**
    * Builds a fresh context for this call, runs each step in order, and resolves
    * with a {@link Result}. On a step failure the flow aborts, `onError` fires
    * once, completed steps are compensated in reverse order (§1.7), and the
    * `Result` carries `ok:false` with the failure and any rollback errors. With
    * `{ throwOnError: true }` the same failure is thrown as a {@link PipelineError}
-   * instead. Per §3.2 all run state is local to this method.
+   * instead. With `{ dryRun: true }` it plans instead of executing (§1.2). Per
+   * §3.2 all run state is local to this method.
    */
   async execute(
     input: TContext['input'],
     options: ExecuteOptions = {},
   ): Promise<Result<TContext>> {
     const logger = options.logger ?? noopLogger;
-    // Phase 5 replaces this placeholder with the real EngineAccessor (§3.5); a
-    // null-prototype object keeps it prototype-pollution-safe in the meantime.
+    // ctx.engines resolves pipeline-scoped engines first, then the global
+    // registry, throwing UsageError on an unknown name (§3.5, §1.10).
     const ctx = createContext(
       input,
-      Object.create(null) as EngineAccessor,
+      createEngineAccessor(this.engines),
       logger,
     ) as TContext;
+    if (options.dryRun) {
+      // Planning, not execution (§1.2): no run/undo, no hooks, no rollback.
+      return this.plan(ctx, logger);
+    }
     const steps: StepReport[] = [];
     // Steps whose `run` completed, in execution order, each with its report.
     // Walked newest-first during rollback (§1.7); local for re-entrancy (§3.2).
@@ -227,6 +248,67 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       return result;
     }
 
+    return { ok: true, context: ctx, steps, error: null, rollbackErrors: [] };
+  }
+
+  /**
+   * Dry-run planner (§1.2): planning, not execution — it produces no side
+   * effects. It evaluates each step's guard and records the ordered plan,
+   * marking each step `'would-run'` or `'skipped'` (with `skipReason`), and
+   * never calls a `run` or `undo`. A guard that itself throws is treated as a
+   * step failure (`'failed'`, `ok:false`) and planning stops there. Hooks are
+   * execution observers, so they do not fire while planning.
+   */
+  private async plan(ctx: TContext, logger: Logger): Promise<Result<TContext>> {
+    const steps: StepReport[] = [];
+    let failure: Failure<TContext> | null = null;
+
+    for (const step of this.steps) {
+      let shouldRun = true;
+      if (step.guard) {
+        const guardStart = performance.now();
+        try {
+          shouldRun = await step.guard(ctx);
+        } catch (raw) {
+          failure = this.recordFailure(
+            step,
+            raw,
+            performance.now() - guardStart,
+            steps,
+            logger,
+          );
+          break;
+        }
+      }
+      if (!shouldRun) {
+        steps.push({
+          name: step.name,
+          status: 'skipped',
+          durationMs: 0,
+          skipReason: 'guard returned false',
+        });
+        logger.debug('step skipped', {
+          stepName: step.name,
+          status: 'skipped',
+        });
+        continue;
+      }
+      steps.push({ name: step.name, status: 'would-run', durationMs: 0 });
+      logger.debug('step would run', {
+        stepName: step.name,
+        status: 'would-run',
+      });
+    }
+
+    if (failure) {
+      return {
+        ok: false,
+        context: ctx,
+        steps,
+        error: failure.error,
+        rollbackErrors: [],
+      };
+    }
     return { ok: true, context: ctx, steps, error: null, rollbackErrors: [] };
   }
 
