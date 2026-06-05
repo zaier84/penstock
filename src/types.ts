@@ -1,4 +1,5 @@
 import type { BaseContext } from './context';
+import type { Step } from './step';
 
 /**
  * The work a `Step` performs: receives the shared context and may mutate it.
@@ -77,3 +78,33 @@ export type EngineMethods = Record<string, (...args: unknown[]) => unknown>;
  * (§3.5) — lands in `engine.ts` in Phase 5; this is its public type contract.
  */
 export type EngineAccessor = Record<string, EngineMethods>;
+
+/**
+ * Observer hook fired immediately before an executed step's `run` (§3.2). Skipped
+ * steps fire no hook. A throw/rejection is contained and never alters flow (§1.8).
+ */
+export type BeforeHook<TContext extends BaseContext> = (
+  ctx: TContext,
+  step: Step<TContext>,
+) => void | Promise<void>;
+
+/**
+ * Observer hook fired after an executed step completes (§3.2). Receives just the
+ * step's outcome — `{ status, durationMs }`, not the full `StepReport`. Skipped
+ * steps fire no hook; a throw/rejection is contained (§1.8).
+ */
+export type AfterHook<TContext extends BaseContext> = (
+  ctx: TContext,
+  step: Step<TContext>,
+  report: { status: StepStatus; durationMs: number },
+) => void | Promise<void>;
+
+/**
+ * Observer hook fired once when a step fails, before rollback begins (§1.7, §3.2).
+ * Observes only; a throw/rejection is contained and never alters flow (§1.8).
+ */
+export type ErrorHook<TContext extends BaseContext> = (
+  error: Error,
+  ctx: TContext,
+  step: Step<TContext>,
+) => void | Promise<void>;
