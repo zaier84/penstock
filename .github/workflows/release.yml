@@ -1,0 +1,42 @@
+# Release: publishes to npm via OIDC trusted publishing when a GitHub Release is
+# published. No npm token is stored anywhere; provenance is generated
+# automatically. This workflow never commits back to the repository.
+#
+# The FIRST publish (0.1.0) is manual and cannot use OIDC — npm requires the
+# package to exist before a Trusted Publisher can be configured (see the Release
+# section of CONTRIBUTING.md). This workflow handles 0.1.1 and every later
+# release.
+#
+# Actions are pinned to a current major tag; SHA-pinning is the hardened option.
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Run under a GitHub Environment so a required-reviewer rule can gate the
+    # publish. Create and configure the `npm` environment in repo settings.
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Trusted publishing requires Node >= 22.14.0; '22' resolves to a
+          # satisfying 22.x release.
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      # Trusted publishing requires npm >= 11.5.1.
+      - run: npm i -g npm@latest
+      - run: npm ci
+      - run: npm run build
+      # Under trusted publishing, provenance is generated automatically — no
+      # --provenance flag, and no NODE_AUTH_TOKEN / NPM_TOKEN. (npm publish also
+      # runs prepublishOnly, which re-runs the full gate suite.)
+      - run: npm publish

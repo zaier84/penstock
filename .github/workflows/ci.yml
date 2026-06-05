@@ -1,0 +1,58 @@
+# Continuous integration: runs the full quality-gate suite on every push to
+# main and on every pull request. No secrets are used, and untrusted PR code
+# never runs with repository secrets (we use pull_request, not
+# pull_request_target).
+#
+# Actions are pinned to a current major tag. SHA-pinning is the hardened option
+# (and can be kept current by Dependabot, which is opt-in — see CONTRIBUTING.md).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      # Collect coverage on a single version; the others just run the tests.
+      - name: Test
+        if: matrix.node-version != '22'
+        run: npm test
+      - name: Test with coverage
+        if: matrix.node-version == '22'
+        run: npm run coverage
+      - run: npm run build
+      - run: npm run check:exports
+
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    # Informative, not gating: penstock has zero runtime dependencies, so any
+    # finding pertains to dev tooling only and never reaches consumers. Fix
+    # promptly, but it does not block a release.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm audit signatures

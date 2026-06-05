@@ -51,12 +51,52 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) — e.g. `feat:
 
 ## Release
 
-Releases are **manual** and follow [SemVer](https://semver.org/); the first release
-is `0.1.0`. The [`CHANGELOG.md`](./CHANGELOG.md) is hand-maintained in the _Keep a
-Changelog_ format — update it in the same change that bumps the version. From
-`0.1.1` onward, publishing runs through GitHub Actions via npm **trusted publishing
-(OIDC)** with automatic provenance; no long-lived tokens are stored. The detailed
-publish runbook is maintained by the project owner.
+Releases follow [SemVer](https://semver.org/); the first release is `0.1.0`. While
+in `0.x`, minor versions may include breaking changes. The
+[`CHANGELOG.md`](./CHANGELOG.md) is hand-maintained in the _Keep a Changelog_
+format — update it in the same change that bumps the version.
+
+penstock publishes via npm **trusted publishing (OIDC)**: no long-lived tokens are
+stored anywhere, and from `0.1.1` onward every release carries automatic
+provenance. Provenance requires a **public** repository. Two workflows back this:
+
+- [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) runs the full gate suite
+  on Node 20, 22, and 24 for every push to `main` and every pull request, plus an
+  informative `npm audit`.
+- [`.github/workflows/release.yml`](./.github/workflows/release.yml) publishes to
+  npm when a GitHub **Release** is published. It is granted only
+  `contents: read` + `id-token: write` and never commits back to the repo.
+
+### One-time setup (project owner)
+
+npm cannot publish the _first_ version of a brand-new package over OIDC — the
+package must already exist before a Trusted Publisher can be configured. So `0.1.0`
+is published manually; from `0.1.1` on, `release.yml` does it automatically.
+
+1. **Create the public GitHub repo** and push `main` (a public repo is required for
+   provenance).
+2. **Confirm the npm name is free** (`npm view penstock`). If it is taken, switch to
+   the scoped name and update `name`, `repository`, and `exports` accordingly.
+3. **Publish `0.1.0` manually:** `npm login` (with 2FA), then `npm publish`. This
+   first version will **not** carry provenance.
+4. **Configure Trusted Publishing** on npmjs.com → the package's **Settings** →
+   enable Trusted Publishing with GitHub (OIDC), matching your org/user, repo, and
+   the `release.yml` filename (and the `npm` Environment, if you use one). Fields
+   are **case-sensitive**; select `npm publish` as the allowed action. Optionally
+   create an `npm` GitHub Environment with required reviewers for an approval gate.
+5. **Harden:** enable 2FA on npm and GitHub, set the package's publishing access to
+   **require two-factor authentication and disallow tokens**, and enable GitHub's
+   private vulnerability reporting (see [`SECURITY.md`](./SECURITY.md)).
+
+Trusted publishing also requires npm ≥ 11.5.1 and Node ≥ 22.14.0 — both are pinned
+in `release.yml`.
+
+### Each subsequent release (`0.1.1`+)
+
+1. Bump the `version` in `package.json` and add a dated section to `CHANGELOG.md`.
+2. Commit and push.
+3. Create a **GitHub Release** for the new tag — this triggers `release.yml`, which
+   publishes to npm with provenance.
 
 ## Security
 
