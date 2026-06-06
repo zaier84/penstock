@@ -29,3 +29,8 @@ While in `0.x`, minor versions may include breaking changes.
   dependencies**.
 
 [0.1.0]: https://github.com/zaier84/penstock/releases/tag/v0.1.0
+
+## [0.1.1] - 2026-06-06
+
+### Fixed
+- Release pipeline configured with OIDC trusted publishing and provenance
