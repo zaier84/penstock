@@ -1,6 +1,6 @@
 {
   "name": "penstock",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Composable, testable backend workflows for Node.js — use-cases, pipelines, steps, and engines, with first-class reverse-order rollback. Zero runtime dependencies.",
   "keywords": [
     "orchestration",
