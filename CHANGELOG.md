@@ -33,4 +33,5 @@ While in `0.x`, minor versions may include breaking changes.
 ## [0.1.1] - 2026-06-06
 
 ### Fixed
+
 - Release pipeline configured with OIDC trusted publishing and provenance
