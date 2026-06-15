@@ -24,6 +24,12 @@ export interface ExecuteOptions {
   throwOnError?: boolean;
   dryRun?: boolean;
   logger?: Logger;
+  /**
+   * Pipeline-level cancellation signal (section 1.3). It is threaded onto
+   * `ctx.signal` so steps can forward it into their own async work; the
+   * between-step cancellation check that acts on it arrives in a later phase.
+   */
+  signal?: AbortSignal;
 }
 
 /** The originating failure captured when a step's `guard` or `run` throws. */
@@ -134,6 +140,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       input,
       createEngineAccessor(this.engines),
       logger,
+      options.signal,
     ) as TContext;
     if (options.dryRun) {
       // Planning, not execution (section 1.2): no run/undo, no hooks, no rollback.

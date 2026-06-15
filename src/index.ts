@@ -18,6 +18,7 @@ export type {
   ErrorHook,
   GuardFn,
   Result,
+  RetryOptions,
   RunFn,
   StepOptions,
   StepReport,

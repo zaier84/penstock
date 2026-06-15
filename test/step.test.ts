@@ -66,6 +66,84 @@ describe('Step', () => {
     );
   });
 
+  describe('retry and timeout options', () => {
+    it.each([0, -1])(
+      'throws UsageError when retry.attempts is %i (below 1)',
+      (attempts) => {
+        expect(
+          () => new Step<TestCtx>('x', { run: noopRun, retry: { attempts } }),
+        ).toThrow(UsageError);
+      },
+    );
+
+    it('accepts retry.attempts of 1 (valid, no actual retry)', () => {
+      const step = new Step<TestCtx>('x', {
+        run: noopRun,
+        retry: { attempts: 1 },
+      });
+      expect(step.retry).toEqual({ attempts: 1 });
+    });
+
+    it('throws UsageError for a negative retry.delayMs', () => {
+      expect(
+        () =>
+          new Step<TestCtx>('x', {
+            run: noopRun,
+            retry: { attempts: 2, delayMs: -1 },
+          }),
+      ).toThrow(UsageError);
+    });
+
+    it('accepts a retry.delayMs of 0', () => {
+      const step = new Step<TestCtx>('x', {
+        run: noopRun,
+        retry: { attempts: 2, delayMs: 0 },
+      });
+      expect(step.retry).toEqual({ attempts: 2, delayMs: 0 });
+    });
+
+    it.each([0, -100])(
+      'throws UsageError when timeout is %i (not > 0)',
+      (timeout) => {
+        expect(() => new Step<TestCtx>('x', { run: noopRun, timeout })).toThrow(
+          UsageError,
+        );
+      },
+    );
+
+    it('accepts a positive timeout', () => {
+      const step = new Step<TestCtx>('x', { run: noopRun, timeout: 1000 });
+      expect(step.timeout).toBe(1000);
+    });
+
+    it('accepts retry and timeout together', () => {
+      const step = new Step<TestCtx>('x', {
+        run: noopRun,
+        retry: { attempts: 3 },
+        timeout: 2000,
+      });
+      expect(step.retry).toEqual({ attempts: 3 });
+      expect(step.timeout).toBe(2000);
+    });
+
+    it('leaves retry and timeout undefined when not supplied', () => {
+      const step = new Step<TestCtx>('x', noopRun);
+      expect(step.retry).toBeUndefined();
+      expect(step.timeout).toBeUndefined();
+    });
+
+    it('preserves retry and timeout through .when()', () => {
+      const original = new Step<TestCtx>('x', {
+        run: noopRun,
+        retry: { attempts: 3, delayMs: 50 },
+        timeout: 2000,
+      });
+      const guarded = original.when(() => true);
+      expect(guarded.retry).toEqual({ attempts: 3, delayMs: 50 });
+      expect(guarded.timeout).toBe(2000);
+    });
+  });
+
   describe('.when()', () => {
     it('returns a new Step with the guard set, leaving the original untouched', () => {
       const run: RunFn<TestCtx> = () => {};

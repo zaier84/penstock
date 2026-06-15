@@ -1,7 +1,13 @@
 import type { BaseContext } from './context';
 import { UsageError } from './errors';
 import { assertSafeName } from './internal';
-import type { GuardFn, RunFn, StepOptions, UndoFn } from './types';
+import type {
+  GuardFn,
+  RetryOptions,
+  RunFn,
+  StepOptions,
+  UndoFn,
+} from './types';
 
 /**
  * The atomic unit of work in a pipeline (section 3.1): a named `run` function with an
@@ -17,6 +23,8 @@ export class Step<TContext extends BaseContext = BaseContext> {
   readonly run: RunFn<TContext>;
   readonly guard?: GuardFn<TContext>;
   readonly undo?: UndoFn<TContext>;
+  readonly retry?: RetryOptions;
+  readonly timeout?: number;
 
   constructor(
     name: string,
@@ -28,6 +36,24 @@ export class Step<TContext extends BaseContext = BaseContext> {
     if (typeof options.run !== 'function') {
       throw new UsageError(`Step "${name}" must define a "run" function`);
     }
+    // Validate retry/timeout synchronously at construction (section 1.7): bad
+    // config is misuse, so it fails fast as a UsageError, not as run-time data.
+    if (options.retry !== undefined) {
+      const { attempts, delayMs } = options.retry;
+      if (attempts < 1) {
+        throw new UsageError(
+          `Step "${name}" retry.attempts must be at least 1`,
+        );
+      }
+      if (delayMs !== undefined && delayMs < 0) {
+        throw new UsageError(
+          `Step "${name}" retry.delayMs must be greater than or equal to 0`,
+        );
+      }
+    }
+    if (options.timeout !== undefined && options.timeout <= 0) {
+      throw new UsageError(`Step "${name}" timeout must be greater than 0`);
+    }
     this.name = name;
     this.run = options.run;
     // Keep optional config truly absent when not supplied (mirrors PipelineError).
@@ -36,6 +62,12 @@ export class Step<TContext extends BaseContext = BaseContext> {
     }
     if (options.undo !== undefined) {
       this.undo = options.undo;
+    }
+    if (options.retry !== undefined) {
+      this.retry = options.retry;
+    }
+    if (options.timeout !== undefined) {
+      this.timeout = options.timeout;
     }
   }
 
@@ -48,6 +80,8 @@ export class Step<TContext extends BaseContext = BaseContext> {
       run: this.run,
       when: fn,
       undo: this.undo,
+      retry: this.retry,
+      timeout: this.timeout,
     });
   }
 }

@@ -26,11 +26,41 @@ export type UndoFn<TContext extends BaseContext> = (
   ctx: TContext,
 ) => void | Promise<void>;
 
+/**
+ * Per-step retry policy (section 1.1). `attempts` is the **total** number of
+ * tries including the first — `attempts: 3` means try once, then up to two more
+ * times — so the minimum is `1` (no retry). Only a step's `run` is retried;
+ * guards (`when`) and compensations (`undo`) are never retried.
+ */
+export interface RetryOptions {
+  /** Total tries including the first; minimum `1`. */
+  attempts: number;
+  /** Base delay between attempts in milliseconds; default `0`, must be `>= 0`. */
+  delayMs?: number;
+  /**
+   * Inter-attempt growth: `'fixed'` (default) keeps every delay at `delayMs`;
+   * `'exponential'` doubles it after each failure (`delayMs * 2^attemptIndex`).
+   */
+  backoff?: 'fixed' | 'exponential';
+  /**
+   * When `true`, add a uniform random fraction of the computed delay to avoid
+   * thundering-herd retries; default `false`.
+   */
+  jitter?: boolean;
+}
+
 /** Full configuration form accepted by the `Step` constructor (section 3.1). */
 export interface StepOptions<TContext extends BaseContext> {
   run: RunFn<TContext>;
   when?: GuardFn<TContext>;
   undo?: UndoFn<TContext>;
+  /** Per-step retry policy (section 1.1); validated at construction. */
+  retry?: RetryOptions;
+  /**
+   * Per-attempt timeout in milliseconds; must be `> 0` (section 1.2). Validated
+   * at construction.
+   */
+  timeout?: number;
 }
 
 /** Lifecycle status of a single step within a `Result`. */
@@ -52,6 +82,13 @@ export interface StepReport {
   error?: Error;
   /** Present for `'skipped'` (e.g. "guard returned false"). */
   skipReason?: string;
+  /**
+   * Number of times `run` was called (section 1.4); present when retry is
+   * configured. A step that succeeded on its 3rd try reports `attempts: 3`.
+   */
+  attempts?: number;
+  /** `true` when the step failed specifically due to a timeout (section 1.4). */
+  timedOut?: boolean;
 }
 
 /** The structured outcome of `pipeline.execute()` (section 3.4). */

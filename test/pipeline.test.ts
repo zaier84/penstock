@@ -468,6 +468,49 @@ describe('Pipeline', () => {
     });
   });
 
+  describe('ctx.signal', () => {
+    it('is always an AbortSignal, even when no options are passed', async () => {
+      let seen: unknown;
+      await new Pipeline<OrderCtx>('sig')
+        .addStep(
+          new Step<OrderCtx>('s', (ctx) => {
+            seen = ctx.signal;
+          }),
+        )
+        .execute({ orderId: 'o' });
+
+      expect(seen).toBeInstanceOf(AbortSignal);
+    });
+
+    it('is not already aborted when no signal is passed', async () => {
+      let aborted: boolean | undefined;
+      const result = await new Pipeline<OrderCtx>('sig')
+        .addStep(
+          new Step<OrderCtx>('s', (ctx) => {
+            aborted = ctx.signal.aborted;
+          }),
+        )
+        .execute({ orderId: 'o' });
+
+      expect(aborted).toBe(false);
+      expect(result.context.signal.aborted).toBe(false);
+    });
+
+    it('threads a caller-supplied signal onto ctx.signal', async () => {
+      const controller = new AbortController();
+      let seen: AbortSignal | undefined;
+      await new Pipeline<OrderCtx>('sig')
+        .addStep(
+          new Step<OrderCtx>('s', (ctx) => {
+            seen = ctx.signal;
+          }),
+        )
+        .execute({ orderId: 'o' }, { signal: controller.signal });
+
+      expect(seen).toBe(controller.signal);
+    });
+  });
+
   describe('builder', () => {
     it('returns the pipeline from every builder method (chainable)', () => {
       const pipeline = new Pipeline<OrderCtx>('chain');
