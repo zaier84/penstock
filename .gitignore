@@ -9,3 +9,4 @@ coverage
 # Build/process docs kept local — not part of the library repository
 BUILD_SPEC.md
 WORKFLOW.md
+PENSTOCK_0.2.0_SPEC.md
