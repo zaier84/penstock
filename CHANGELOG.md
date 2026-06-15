@@ -35,3 +35,16 @@ While in `0.x`, minor versions may include breaking changes.
 ### Fixed
 
 - Release pipeline configured with OIDC trusted publishing and provenance
+
+[0.1.1]: https://github.com/zaier84/penstock/releases/tag/v0.1.1
+
+## [0.1.2] - 2026-06-15
+
+### Fixed
+
+- `ctx.engines` now returns `undefined` for symbol-keyed property access instead
+  of throwing, so inspecting a context (e.g. `console.log(ctx)`) no longer raises
+  a spurious `Unknown engine` error. Unknown string engine names still throw a
+  `UsageError`.
+
+[0.1.2]: https://github.com/zaier84/penstock/releases/tag/v0.1.2
