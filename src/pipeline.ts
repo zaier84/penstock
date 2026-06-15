@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from 'node:timers/promises';
+
 import type { BaseContext } from './context';
 import { createContext } from './context';
 import { createEngineAccessor } from './engine';
@@ -12,6 +14,7 @@ import type {
   BeforeHook,
   ErrorHook,
   Result,
+  RetryOptions,
   StepReport,
 } from './types';
 
@@ -43,6 +46,15 @@ interface Completed<TContext extends BaseContext> {
   step: Step<TContext>;
   report: StepReport;
 }
+
+/**
+ * Outcome of running a step's `run` under its retry policy (section 1.1).
+ * `attempts` is how many times `run` was actually called, recorded on the
+ * {@link StepReport} either way.
+ */
+type RunOutcome =
+  | { ok: true; attempts: number }
+  | { ok: false; attempts: number; error: unknown };
 
 /**
  * An ordered, named collection of steps (section 3.2). It threads one context through
@@ -194,25 +206,27 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       );
 
       const start = performance.now();
-      try {
-        await step.run(ctx);
-      } catch (raw) {
+      // Run with the step's retry policy (section 1.1); only `run` is retried.
+      const outcome = await this.executeStepRun(step, ctx);
+      const durationMs = performance.now() - start;
+      if (!outcome.ok) {
         failure = this.recordFailure(
           step,
-          raw,
-          performance.now() - start,
+          outcome.error,
+          durationMs,
           steps,
           logger,
+          outcome.attempts,
         );
         break;
       }
-      const durationMs = performance.now() - start;
 
       // Keep the report by reference so rollback can flip its status in place.
       const report: StepReport = {
         name: step.name,
         status: 'completed',
         durationMs,
+        attempts: outcome.attempts,
       };
       steps.push(report);
       completed.push({ step, report });
@@ -320,10 +334,45 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   }
 
   /**
+   * Runs a step's `run` under its retry policy (section 1.1). Only `run` is
+   * retried — guards and undos never are. For up to `attempts` tries it calls
+   * `run`; on success it returns the attempt count, and on failure it waits the
+   * computed backoff delay before trying again, surfacing the final attempt's
+   * error once the budget is spent. The inter-attempt delay is passed
+   * `ctx.signal` so a pipeline cancellation can wake it early (section 1.3). A
+   * step with no `retry` runs exactly once (`attempts: 1`).
+   */
+  private async executeStepRun(
+    step: Step<TContext>,
+    ctx: TContext,
+  ): Promise<RunOutcome> {
+    const retry = step.retry;
+    const maxAttempts = retry?.attempts ?? 1;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await step.run(ctx);
+        return { ok: true, attempts: attempt };
+      } catch (error) {
+        // No retry policy, or the budget is spent: surface this final error.
+        // (Testing `retry === undefined` first also narrows it below.)
+        if (retry === undefined || attempt >= maxAttempts) {
+          return { ok: false, attempts: attempt, error };
+        }
+        const delayMs = computeRetryDelay(retry, attempt - 1);
+        if (delayMs > 0) {
+          await sleep(delayMs, undefined, { signal: ctx.signal });
+        }
+      }
+    }
+  }
+
+  /**
    * Records a step failure: wraps the raw thrown value in a {@link StepError}
    * (preserving it as `.cause`, section 3.8), pushes a `'failed'` report (section 3.4), logs
    * the lifecycle at `debug` with names/types only (section 1.10), and returns the
-   * failure so `execute` can fire `onError` and roll back.
+   * failure so `execute` can fire `onError` and roll back. `attempts` is recorded
+   * when the failure came from a step's `run` (a guard failure leaves it unset,
+   * since `run` was never reached).
    */
   private recordFailure(
     step: Step<TContext>,
@@ -331,9 +380,19 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     durationMs: number,
     steps: StepReport[],
     logger: Logger,
+    attempts?: number,
   ): Failure<TContext> {
     const error = new StepError(step.name, { cause: raw });
-    steps.push({ name: step.name, status: 'failed', durationMs, error });
+    const report: StepReport = {
+      name: step.name,
+      status: 'failed',
+      durationMs,
+      error,
+    };
+    if (attempts !== undefined) {
+      report.attempts = attempts;
+    }
+    steps.push(report);
     logger.debug('step failed', {
       stepName: step.name,
       status: 'failed',
@@ -431,6 +490,20 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       }
     }
   }
+}
+
+/**
+ * Computes the delay before the next retry attempt (section 1.1). `attemptIndex`
+ * is zero-based for the upcoming wait (0 for the gap after the first try), so
+ * `'fixed'` keeps every delay at `delayMs` and `'exponential'` doubles it:
+ * `delayMs * 2^attemptIndex`. With `jitter`, a uniform random fraction of the
+ * delay is added (range `[delay, 2 * delay)`) to avoid thundering-herd retries.
+ */
+function computeRetryDelay(retry: RetryOptions, attemptIndex: number): number {
+  const base = retry.delayMs ?? 0;
+  const delay =
+    retry.backoff === 'exponential' ? base * 2 ** attemptIndex : base;
+  return retry.jitter ? delay + Math.random() * delay : delay;
 }
 
 /**
