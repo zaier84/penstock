@@ -92,14 +92,21 @@ export function createEngineAccessor(
 ): EngineAccessor {
   const target = Object.create(null) as EngineAccessor;
   return new Proxy(target, {
-    get(_target, prop): EngineMethods {
-      // `String(prop)` also coerces any symbol key to a string for the lookup,
-      // which a `Map` simply reports as absent — never a prototype-chain hit.
-      const name = String(prop);
-      // Resolution order: pipeline-scoped first, then the global registry.
-      const engine = scoped.get(name) ?? globalRegistry.get(name);
+    get(_target, prop): EngineMethods | undefined {
+      // Symbol keys are never engine names. They reach this trap when something
+      // probes the object generically — e.g. `console.log(ctx)` triggering
+      // Node's `util.inspect.custom` / `Symbol.toStringTag` lookups. Report them
+      // absent rather than throwing a confusing "Unknown engine" error; only
+      // string names resolve or throw.
+      if (typeof prop === 'symbol') {
+        return undefined;
+      }
+      // Resolution order: pipeline-scoped first, then the global registry. The
+      // lookups go through `Map.get` and the target is null-prototype, so a name
+      // like `constructor` is simply unknown — never a prototype-chain hit.
+      const engine = scoped.get(prop) ?? globalRegistry.get(prop);
       if (engine === undefined) {
-        throw new UsageError(`Unknown engine "${name}"`);
+        throw new UsageError(`Unknown engine "${prop}"`);
       }
       return engine.methods;
     },

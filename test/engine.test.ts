@@ -1,7 +1,14 @@
+import { inspect } from 'node:util';
+
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { BaseContext } from '../src/context';
-import { Engine, clearEngines, registerEngine } from '../src/engine';
+import {
+  Engine,
+  clearEngines,
+  createEngineAccessor,
+  registerEngine,
+} from '../src/engine';
 import { StepError, UsageError } from '../src/errors';
 import { Pipeline } from '../src/pipeline';
 import { Step } from '../src/step';
@@ -171,6 +178,31 @@ describe('Engine', () => {
       const cause = (result.error as StepError).cause;
       expect(cause).toBeInstanceOf(UsageError);
       expect((cause as Error).message).toContain('nope');
+    });
+  });
+
+  describe('accessor robustness', () => {
+    it('returns undefined for symbol-keyed access instead of throwing', () => {
+      const engines = createEngineAccessor(new Map());
+      const probe = engines as unknown as Record<symbol, unknown>;
+
+      expect(probe[Symbol.toStringTag]).toBeUndefined();
+      expect(probe[Symbol.iterator]).toBeUndefined();
+    });
+
+    it('can be inspected without throwing (console.log(ctx) safety)', () => {
+      const engines = createEngineAccessor(new Map());
+
+      // Node's inspector probes well-known symbols; none must throw (§3.5).
+      expect(() => inspect(engines)).not.toThrow();
+    });
+
+    it('still throws a UsageError for an unknown string name', () => {
+      const engines = createEngineAccessor(new Map());
+
+      expect(() => (engines as Record<string, unknown>).nope).toThrow(
+        UsageError,
+      );
     });
   });
 });
