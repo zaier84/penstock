@@ -78,7 +78,7 @@ describe('UseCase', () => {
 
       expect(order).toEqual(['A', 'B']);
       expect(result.pipelines).toHaveLength(2);
-      // The same input reference is threaded into every pipeline (§3.6).
+      // The same input reference is threaded into every pipeline (section 3.6).
       expect(result.pipelines[0]?.context.input).toBe(input);
       expect(result.pipelines[1]?.context.input).toBe(input);
       expect(seen[0]).toBe(input);
@@ -102,7 +102,7 @@ describe('UseCase', () => {
         .addPipeline(b)
         .execute({ fail: false, tag: 'x' });
 
-      // Each pipeline builds a fresh context; they are not shared (§3.3).
+      // Each pipeline builds a fresh context; they are not shared (section 3.3).
       expect(result.pipelines[0]?.context).not.toBe(
         result.pipelines[1]?.context,
       );

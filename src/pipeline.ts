@@ -16,9 +16,9 @@ import type {
 } from './types';
 
 /**
- * Options for {@link Pipeline.execute} (§3.2). `logger` selects the run logger
+ * Options for {@link Pipeline.execute} (section 3.2). `logger` selects the run logger
  * (default no-op), `throwOnError` rethrows a failure as a {@link PipelineError}
- * (§1.7), and `dryRun` switches to planning instead of execution (§1.2).
+ * (section 1.7), and `dryRun` switches to planning instead of execution (section 1.2).
  */
 export interface ExecuteOptions {
   throwOnError?: boolean;
@@ -39,23 +39,23 @@ interface Completed<TContext extends BaseContext> {
 }
 
 /**
- * An ordered, named collection of steps (§3.2). It threads one context through
+ * An ordered, named collection of steps (section 3.2). It threads one context through
  * its steps, evaluates guards, fires observer hooks, runs steps in sequence,
- * and — when a step fails — performs best-effort, reverse-order rollback (§1.7)
+ * and — when a step fails — performs best-effort, reverse-order rollback (section 1.7)
  * before returning a structured {@link Result}. The instance holds only
  * immutable config; every piece of per-run state lives in
  * {@link Pipeline.execute}-local variables, so a pipeline is safe to `execute`
- * repeatedly and concurrently (§3.2 re-entrancy).
+ * repeatedly and concurrently (section 3.2 re-entrancy).
  *
- * Pipeline-scoped engines (§3.5) shadow the global registry, and `dryRun`
- * planning is available via {@link Pipeline.execute} (§1.2).
+ * Pipeline-scoped engines (section 3.5) shadow the global registry, and `dryRun`
+ * planning is available via {@link Pipeline.execute} (section 1.2).
  */
 export class Pipeline<TContext extends BaseContext = BaseContext> {
   readonly name: string;
   private readonly steps: Step<TContext>[] = [];
-  // Step-name dedup uses a Set, never a user-keyed plain object (§1.10).
+  // Step-name dedup uses a Set, never a user-keyed plain object (section 1.10).
   private readonly stepNames = new Set<string>();
-  // Pipeline-scoped engines, Map-backed for the same reason (§1.10). Build-time
+  // Pipeline-scoped engines, Map-backed for the same reason (section 1.10). Build-time
   // config (set via useEngine), read-only during execute — not per-run state.
   private readonly engines = new Map<string, Engine>();
   private readonly beforeHooks: BeforeHook<TContext>[] = [];
@@ -63,14 +63,14 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   private readonly errorHooks: ErrorHook<TContext>[] = [];
 
   constructor(name: string) {
-    // Empty / non-string / reserved name → UsageError, synchronously (§1.10).
+    // Empty / non-string / reserved name → UsageError, synchronously (section 1.10).
     assertSafeName('Pipeline', name);
     this.name = name;
   }
 
   /**
    * Appends a step. Throws a `UsageError` synchronously if `step` is not a
-   * `Step` or its name duplicates one already in this pipeline (§3.2).
+   * `Step` or its name duplicates one already in this pipeline (section 3.2).
    */
   addStep(step: Step<TContext>): this {
     if (!(step instanceof Step)) {
@@ -86,19 +86,19 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     return this;
   }
 
-  /** Registers a `before` observer hook; multiple are allowed (§3.2). */
+  /** Registers a `before` observer hook; multiple are allowed (section 3.2). */
   before(hook: BeforeHook<TContext>): this {
     this.beforeHooks.push(hook);
     return this;
   }
 
-  /** Registers an `after` observer hook; multiple are allowed (§3.2). */
+  /** Registers an `after` observer hook; multiple are allowed (section 3.2). */
   after(hook: AfterHook<TContext>): this {
     this.afterHooks.push(hook);
     return this;
   }
 
-  /** Registers an `onError` observer hook; multiple are allowed (§3.2). */
+  /** Registers an `onError` observer hook; multiple are allowed (section 3.2). */
   onError(hook: ErrorHook<TContext>): this {
     this.errorHooks.push(hook);
     return this;
@@ -106,8 +106,8 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 
   /**
    * Registers an engine scoped to this pipeline; during resolution it shadows a
-   * global engine of the same name (§3.5). The scoped store is a `Map`, never a
-   * user-keyed plain object (§1.10). Chainable.
+   * global engine of the same name (section 3.5). The scoped store is a `Map`, never a
+   * user-keyed plain object (section 1.10). Chainable.
    */
   useEngine(engine: Engine): this {
     this.engines.set(engine.name, engine);
@@ -117,11 +117,11 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   /**
    * Builds a fresh context for this call, runs each step in order, and resolves
    * with a {@link Result}. On a step failure the flow aborts, `onError` fires
-   * once, completed steps are compensated in reverse order (§1.7), and the
+   * once, completed steps are compensated in reverse order (section 1.7), and the
    * `Result` carries `ok:false` with the failure and any rollback errors. With
    * `{ throwOnError: true }` the same failure is thrown as a {@link PipelineError}
-   * instead. With `{ dryRun: true }` it plans instead of executing (§1.2). Per
-   * §3.2 all run state is local to this method.
+   * instead. With `{ dryRun: true }` it plans instead of executing (section 1.2). Per
+   * section 3.2 all run state is local to this method.
    */
   async execute(
     input: TContext['input'],
@@ -129,25 +129,25 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   ): Promise<Result<TContext>> {
     const logger = options.logger ?? noopLogger;
     // ctx.engines resolves pipeline-scoped engines first, then the global
-    // registry, throwing UsageError on an unknown name (§3.5, §1.10).
+    // registry, throwing UsageError on an unknown name (section 3.5, section 1.10).
     const ctx = createContext(
       input,
       createEngineAccessor(this.engines),
       logger,
     ) as TContext;
     if (options.dryRun) {
-      // Planning, not execution (§1.2): no run/undo, no hooks, no rollback.
+      // Planning, not execution (section 1.2): no run/undo, no hooks, no rollback.
       return this.plan(ctx, logger);
     }
     const steps: StepReport[] = [];
     // Steps whose `run` completed, in execution order, each with its report.
-    // Walked newest-first during rollback (§1.7); local for re-entrancy (§3.2).
+    // Walked newest-first during rollback (section 1.7); local for re-entrancy (section 3.2).
     const completed: Completed<TContext>[] = [];
     let failure: Failure<TContext> | null = null;
 
     for (const step of this.steps) {
-      // The guard is the only flow-control mechanism (§1.8); a throwing guard is
-      // treated as a step failure (§7 Phase 4). Evaluate it before any hook.
+      // The guard is the only flow-control mechanism (section 1.8); a throwing guard is
+      // treated as a step failure (section 7 Phase 4). Evaluate it before any hook.
       let shouldRun = true;
       if (step.guard) {
         const guardStart = performance.now();
@@ -226,7 +226,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 
     if (failure) {
       const { error, step } = failure;
-      // `onError` fires once, for the originating failure, BEFORE rollback (§1.7).
+      // `onError` fires once, for the originating failure, BEFORE rollback (section 1.7).
       await this.runHooks(
         this.errorHooks,
         (hook) => hook(error, ctx, step),
@@ -252,7 +252,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   }
 
   /**
-   * Dry-run planner (§1.2): planning, not execution — it produces no side
+   * Dry-run planner (section 1.2): planning, not execution — it produces no side
    * effects. It evaluates each step's guard and records the ordered plan,
    * marking each step `'would-run'` or `'skipped'` (with `skipReason`), and
    * never calls a `run` or `undo`. A guard that itself throws is treated as a
@@ -314,8 +314,8 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 
   /**
    * Records a step failure: wraps the raw thrown value in a {@link StepError}
-   * (preserving it as `.cause`, §3.8), pushes a `'failed'` report (§3.4), logs
-   * the lifecycle at `debug` with names/types only (§1.10), and returns the
+   * (preserving it as `.cause`, section 3.8), pushes a `'failed'` report (section 3.4), logs
+   * the lifecycle at `debug` with names/types only (section 1.10), and returns the
    * failure so `execute` can fire `onError` and roll back.
    */
   private recordFailure(
@@ -336,7 +336,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   }
 
   /**
-   * Best-effort, reverse-order compensation (§1.7). Walks completed steps
+   * Best-effort, reverse-order compensation (section 1.7). Walks completed steps
    * newest-first and runs each `undo` if present. A successful undo flips the
    * report to `'rolled-back'`; a throwing undo flips it to `'rollback-failed'`,
    * collects the error (logged at `error`), and — crucially — does **not** abort
@@ -379,7 +379,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 
   /**
    * Builds the {@link PipelineError} thrown under `{ throwOnError: true }`
-   * (§1.7): its `.cause` is the originating step failure (`=== result.error`),
+   * (section 1.7): its `.cause` is the originating step failure (`=== result.error`),
    * and when any `undo` failed its `.rollbackErrors` is a native `AggregateError`
    * bundling them.
    */
@@ -399,10 +399,10 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   }
 
   /**
-   * Runs observer hooks in registration order. Hooks are observers (§1.8): a
+   * Runs observer hooks in registration order. Hooks are observers (section 1.8): a
    * throw or rejection is caught and never alters flow. A `before`/`after` throw
    * is logged at `warn`, an `onError` throw at `error`. The log carries only
-   * names and the error's type/message — no payloads (§1.10).
+   * names and the error's type/message — no payloads (section 1.10).
    */
   private async runHooks<H>(
     hooks: readonly H[],
@@ -428,7 +428,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 
 /**
  * Reduces a thrown value to a loggable `{ errorType, errorMessage }` — names and
- * types only, never raw payloads or context (§1.10). Handles non-Error throws.
+ * types only, never raw payloads or context (section 1.10). Handles non-Error throws.
  */
 function describeError(err: unknown): {
   errorType: string;

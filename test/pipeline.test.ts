@@ -343,7 +343,7 @@ describe('Pipeline', () => {
     });
   });
 
-  describe('log hygiene (§1.10)', () => {
+  describe('log hygiene (section 1.10)', () => {
     it('never passes input or context values to the logger', async () => {
       const { logger, calls } = makeCapturingLogger();
       const SECRET_INPUT = 'super-secret-input-value';

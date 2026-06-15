@@ -3,7 +3,7 @@ import { UsageError } from './errors';
 /**
  * Names that must never be used for a step, pipeline, engine, or use-case: they
  * collide with object-prototype keys and are a prototype-pollution vector
- * (§1.10). Held in a `Set` so the membership check never walks the prototype
+ * (section 1.10). Held in a `Set` so the membership check never walks the prototype
  * chain.
  */
 const RESERVED_NAMES: ReadonlySet<string> = new Set([
@@ -15,7 +15,7 @@ const RESERVED_NAMES: ReadonlySet<string> = new Set([
 /**
  * Validates a user-supplied name, throwing a `UsageError` for a non-string, an
  * empty string, or a reserved/unsafe name. Uses plain string and `Set` checks
- * only — ReDoS-safe, no regex (§1.10). Internal; not part of the public surface.
+ * only — ReDoS-safe, no regex (section 1.10). Internal; not part of the public surface.
  *
  * @param kind Human label for the entity, used in the error message (e.g. "Step").
  * @param name The candidate name to validate.

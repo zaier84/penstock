@@ -47,7 +47,7 @@ function status(
   return result.steps.find((s) => s.name === name)?.status;
 }
 
-describe('Pipeline rollback & error handling (§1.7)', () => {
+describe('Pipeline rollback & error handling (section 1.7)', () => {
   describe('step failure', () => {
     it('marks the failing step failed and never runs later steps', async () => {
       const later = vi.fn();
@@ -368,7 +368,7 @@ describe('Pipeline rollback & error handling (§1.7)', () => {
         })
         .execute({ orderId: 'o' }, { logger });
 
-      // The hook throw never alters ok and never blocks rollback (§1.8).
+      // The hook throw never alters ok and never blocks rollback (section 1.8).
       expect(result.ok).toBe(false);
       expect(undo).toHaveBeenCalledTimes(1);
       expect(status(result, 'a')).toBe('rolled-back');

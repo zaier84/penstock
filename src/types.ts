@@ -12,7 +12,7 @@ export type RunFn<TContext extends BaseContext> = (
 /**
  * A step's optional guard — a pure predicate over the context. A falsy result
  * skips the step. Guards must not mutate the context or cause side effects;
- * dry-run (§1.2) relies on this contract.
+ * dry-run (section 1.2) relies on this contract.
  */
 export type GuardFn<TContext extends BaseContext> = (
   ctx: TContext,
@@ -20,13 +20,13 @@ export type GuardFn<TContext extends BaseContext> = (
 
 /**
  * A step's optional compensation, run in reverse order during rollback when a
- * later step fails (§1.7).
+ * later step fails (section 1.7).
  */
 export type UndoFn<TContext extends BaseContext> = (
   ctx: TContext,
 ) => void | Promise<void>;
 
-/** Full configuration form accepted by the `Step` constructor (§3.1). */
+/** Full configuration form accepted by the `Step` constructor (section 3.1). */
 export interface StepOptions<TContext extends BaseContext> {
   run: RunFn<TContext>;
   when?: GuardFn<TContext>;
@@ -42,7 +42,7 @@ export type StepStatus =
   | 'rollback-failed'
   | 'would-run';
 
-/** Per-step entry in a `Result`, in pipeline order (§3.4). */
+/** Per-step entry in a `Result`, in pipeline order (section 3.4). */
 export interface StepReport {
   name: string;
   status: StepStatus;
@@ -54,7 +54,7 @@ export interface StepReport {
   skipReason?: string;
 }
 
-/** The structured outcome of `pipeline.execute()` (§3.4). */
+/** The structured outcome of `pipeline.execute()` (section 3.4). */
 export interface Result<TContext extends BaseContext> {
   /** `false` iff a step's run (or a guard) threw and the pipeline aborted. */
   ok: boolean;
@@ -75,13 +75,13 @@ export type EngineMethods = Record<string, (...args: unknown[]) => unknown>;
  * Resolver behind `ctx.engines`: indexed by engine name, each entry is that
  * engine's `EngineMethods`. The concrete Map-backed implementation — which
  * throws a `UsageError` on an unknown name rather than returning `undefined`
- * (§3.5) — lands in `engine.ts` in Phase 5; this is its public type contract.
+ * (section 3.5) — lands in `engine.ts` in Phase 5; this is its public type contract.
  */
 export type EngineAccessor = Record<string, EngineMethods>;
 
 /**
- * Observer hook fired immediately before an executed step's `run` (§3.2). Skipped
- * steps fire no hook. A throw/rejection is contained and never alters flow (§1.8).
+ * Observer hook fired immediately before an executed step's `run` (section 3.2). Skipped
+ * steps fire no hook. A throw/rejection is contained and never alters flow (section 1.8).
  */
 export type BeforeHook<TContext extends BaseContext> = (
   ctx: TContext,
@@ -89,9 +89,9 @@ export type BeforeHook<TContext extends BaseContext> = (
 ) => void | Promise<void>;
 
 /**
- * Observer hook fired after an executed step completes (§3.2). Receives just the
+ * Observer hook fired after an executed step completes (section 3.2). Receives just the
  * step's outcome — `{ status, durationMs }`, not the full `StepReport`. Skipped
- * steps fire no hook; a throw/rejection is contained (§1.8).
+ * steps fire no hook; a throw/rejection is contained (section 1.8).
  */
 export type AfterHook<TContext extends BaseContext> = (
   ctx: TContext,
@@ -100,8 +100,8 @@ export type AfterHook<TContext extends BaseContext> = (
 ) => void | Promise<void>;
 
 /**
- * Observer hook fired once when a step fails, before rollback begins (§1.7, §3.2).
- * Observes only; a throw/rejection is contained and never alters flow (§1.8).
+ * Observer hook fired once when a step fails, before rollback begins (section 1.7, section 3.2).
+ * Observes only; a throw/rejection is contained and never alters flow (section 1.8).
  */
 export type ErrorHook<TContext extends BaseContext> = (
   error: Error,

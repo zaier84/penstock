@@ -4,7 +4,7 @@ import type { EngineAccessor, EngineMethods } from './types';
 
 /**
  * A reusable, named bundle of domain functions invoked by steps via
- * `ctx.engines.<name>.<method>` (§3.5). Engines are callable services, not part
+ * `ctx.engines.<name>.<method>` (section 3.5). Engines are callable services, not part
  * of the linear flow. A `Step` calls a method as `ctx.engines.pricing.total(...)`,
  * so the method runs with the bundle as its `this`; pure functions are
  * recommended. The instance is immutable: `name` and `methods` are `readonly`.
@@ -15,15 +15,15 @@ export class Engine {
 
   // The parameter is the permissive "any record of functions" type so concrete
   // method bundles (e.g. `{ total(order: OrderInput): number }`) construct
-  // cast-free; it is stored as the public {@link EngineMethods} (§3.5). Using
+  // cast-free; it is stored as the public {@link EngineMethods} (section 3.5). Using
   // `never[]` params keeps it `any`-free while accepting any function arity.
   constructor(
     name: string,
     methods: Record<string, (...args: never[]) => unknown>,
   ) {
-    // Empty / non-string / reserved name → UsageError, synchronously (§1.10).
+    // Empty / non-string / reserved name → UsageError, synchronously (section 1.10).
     assertSafeName('Engine', name);
-    // A TS cast could smuggle in a non-object, so re-validate at runtime (§1.1):
+    // A TS cast could smuggle in a non-object, so re-validate at runtime (section 1.1):
     // the bundle must be a non-empty record whose every value is a function.
     const bundle: unknown = methods;
     if (bundle === null || typeof bundle !== 'object') {
@@ -51,16 +51,16 @@ export class Engine {
 }
 
 /**
- * The process-wide engine registry (§3.5). `Map`-backed, never a plain object
+ * The process-wide engine registry (section 3.5). `Map`-backed, never a plain object
  * keyed by a user-supplied name, so engine names cannot reach the prototype
- * chain (§1.10). Mutated only via the explicit `registerEngine` / `clearEngines`
+ * chain (section 1.10). Mutated only via the explicit `registerEngine` / `clearEngines`
  * calls below, keeping the package free of import-time side effects.
  */
 const globalRegistry = new Map<string, Engine>();
 
 /**
  * Registers an engine in the global registry. Re-registering an existing name
- * throws a `UsageError` — no silent override (§3.5). The registry is
+ * throws a `UsageError` — no silent override (section 3.5). The registry is
  * process-wide shared mutable state; `Pipeline.useEngine` is the isolated,
  * recommended alternative for apps that want no globals.
  */
@@ -73,15 +73,15 @@ export function registerEngine(engine: Engine): void {
 
 /**
  * Empties the global registry. Required for test isolation — suites that call
- * `registerEngine` must invoke this in `afterEach` (§3.5).
+ * `registerEngine` must invoke this in `afterEach` (section 3.5).
  */
 export function clearEngines(): void {
   globalRegistry.clear();
 }
 
 /**
- * Builds the `ctx.engines` resolver for one `execute` call (§3.5). It is a
- * `Proxy` over a null-prototype target (§1.10) so a property access like
+ * Builds the `ctx.engines` resolver for one `execute` call (section 3.5). It is a
+ * `Proxy` over a null-prototype target (section 1.10) so a property access like
  * `ctx.engines.pricing` resolves by name: pipeline-scoped engines shadow global
  * ones, and an unregistered name throws a clear `UsageError` (`Unknown engine
  * "x"`) rather than yielding `undefined` and a downstream `TypeError`. Lookups

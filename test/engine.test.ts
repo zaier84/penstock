@@ -19,12 +19,12 @@ interface DemoInput {
 }
 
 interface DemoCtx extends BaseContext<DemoInput> {
-  // Engine methods return `unknown` (§3.5); tests capture results loosely.
+  // Engine methods return `unknown` (section 3.5); tests capture results loosely.
   sum?: unknown;
   value?: unknown;
 }
 
-// The global registry is process-wide mutable state (§3.5); reset between tests.
+// The global registry is process-wide mutable state (section 3.5); reset between tests.
 afterEach(() => {
   clearEngines();
 });
@@ -193,7 +193,7 @@ describe('Engine', () => {
     it('can be inspected without throwing (console.log(ctx) safety)', () => {
       const engines = createEngineAccessor(new Map());
 
-      // Node's inspector probes well-known symbols; none must throw (§3.5).
+      // Node's inspector probes well-known symbols; none must throw (section 3.5).
       expect(() => inspect(engines)).not.toThrow();
     });
 

@@ -2,7 +2,7 @@ import type { BaseContext } from './context';
 import type { Result } from './types';
 
 /**
- * Base class for every error penstock throws (§3.8). Sets a precise `name`,
+ * Base class for every error penstock throws (section 3.8). Sets a precise `name`,
  * forwards the native `cause` option, and restores the prototype chain so
  * `instanceof` works even if the class is ever down-leveled below ES2022.
  */
@@ -15,8 +15,8 @@ export class PenstockError extends Error {
 }
 
 /**
- * Synchronous misuse (§1.1): bad construction, a missing `run`, duplicate
- * names, an unknown engine reference, or a reserved/unsafe name (§1.10). Thrown
+ * Synchronous misuse (section 1.1): bad construction, a missing `run`, duplicate
+ * names, an unknown engine reference, or a reserved/unsafe name (section 1.10). Thrown
  * at construction/registration time regardless of `throwOnError`.
  */
 export class UsageError extends PenstockError {
@@ -27,9 +27,9 @@ export class UsageError extends PenstockError {
 }
 
 /**
- * Wraps a step `run` failure (§3.8). Carries the failing step's name and
+ * Wraps a step `run` failure (section 3.8). Carries the failing step's name and
  * preserves the original error as `.cause`, used to populate `StepReport.error`
- * and `result.error` without leaking raw payloads (§1.10).
+ * and `result.error` without leaking raw payloads (section 1.10).
  */
 export class StepError extends PenstockError {
   readonly stepName: string;
@@ -43,7 +43,7 @@ export class StepError extends PenstockError {
 
 /**
  * Thrown by `execute` when `{ throwOnError: true }` and the pipeline fails
- * (§1.7). Carries the full `Result`, the originating step failure as `.cause`,
+ * (section 1.7). Carries the full `Result`, the originating step failure as `.cause`,
  * and — when any `undo` also failed — those failures bundled as a native
  * `AggregateError` on `.rollbackErrors`.
  */

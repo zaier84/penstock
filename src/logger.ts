@@ -1,7 +1,7 @@
 /**
  * Structured logger injected via `execute(input, { logger })` and exposed at
  * `ctx.logger`. The pipeline logs lifecycle at `debug`, contained hook errors at
- * `warn`, and rollback failures at `error`. Per §1.10 the library never passes
+ * `warn`, and rollback failures at `error`. Per section 1.10 the library never passes
  * `ctx.input` or any context value into `meta` — only names, statuses,
  * durations, and error message/type.
  */
@@ -12,7 +12,7 @@ export interface Logger {
   error(msg: string, meta?: Record<string, unknown>): void;
 }
 
-/** The default logger: discards everything (§3.7). */
+/** The default logger: discards everything (section 3.7). */
 export const noopLogger: Logger = {
   debug() {},
   info() {},
@@ -22,7 +22,7 @@ export const noopLogger: Logger = {
 
 /**
  * A small built-in logger that forwards to the matching `console` method. It
- * simply relays what it is given; the log-hygiene guarantee (§1.10) is enforced
+ * simply relays what it is given; the log-hygiene guarantee (section 1.10) is enforced
  * at the pipeline's call sites, not here.
  */
 export const consoleLogger: Logger = {

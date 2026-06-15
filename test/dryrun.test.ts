@@ -11,7 +11,7 @@ interface FlowInput {
 
 type FlowCtx = BaseContext<FlowInput>;
 
-describe('dry-run planning (§1.2)', () => {
+describe('dry-run planning (section 1.2)', () => {
   it('plans the flow without calling any run or undo', async () => {
     const run = vi.fn();
     const undo = vi.fn();

@@ -5,10 +5,10 @@ import { StepError, UsageError } from '../src/errors';
 import { Pipeline } from '../src/pipeline';
 import { Step } from '../src/step';
 
-// The names that must be rejected everywhere a name is accepted (§1.10).
+// The names that must be rejected everywhere a name is accepted (section 1.10).
 const RESERVED = ['__proto__', 'prototype', 'constructor'];
 
-describe('security invariants (§1.10)', () => {
+describe('security invariants (section 1.10)', () => {
   describe('reserved-name rejection', () => {
     it.each(RESERVED)('rejects an engine named "%s"', (name) => {
       expect(() => new Engine(name, { m() {} })).toThrow(UsageError);
@@ -40,7 +40,7 @@ describe('security invariants (§1.10)', () => {
 
   it('uses a Map-backed engine accessor that never leaks Object.prototype members', async () => {
     // A plain-object registry would surface Object.prototype.hasOwnProperty here;
-    // the Map-backed accessor instead reports it as an unknown engine (§1.10).
+    // the Map-backed accessor instead reports it as an unknown engine (section 1.10).
     const result = await new Pipeline('proto-leak')
       .addStep(
         new Step('reads-builtin', (ctx) => {

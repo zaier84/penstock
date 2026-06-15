@@ -1,4 +1,4 @@
-// Public API surface for penstock — the complete set of exports (§3).
+// Public API surface for penstock — the complete set of exports (section 3).
 
 export { Step } from './step';
 export { Pipeline } from './pipeline';

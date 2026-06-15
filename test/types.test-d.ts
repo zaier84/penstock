@@ -8,13 +8,13 @@ interface OrderInput {
 }
 
 // A user context extending BaseContext: mid-run fields are optional because they
-// do not exist until the step that populates them runs (§3.3).
+// do not exist until the step that populates them runs (section 3.3).
 interface OrderCtx extends BaseContext<OrderInput> {
   reservationId?: string;
   total?: number;
 }
 
-describe('generic context inference (§3.3)', () => {
+describe('generic context inference (section 3.3)', () => {
   it('types ctx fields inside a step run', () => {
     new Step<OrderCtx>('calc', (ctx) => {
       expectTypeOf(ctx.input).toEqualTypeOf<OrderInput>();
