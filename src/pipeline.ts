@@ -48,13 +48,22 @@ interface Completed<TContext extends BaseContext> {
 }
 
 /**
- * Outcome of running a step's `run` under its retry policy (section 1.1).
- * `attempts` is how many times `run` was actually called, recorded on the
- * {@link StepReport} either way.
+ * Outcome of running a step's `run` under its retry policy (section 1.1) and
+ * per-attempt timeout (section 1.2). `attempts` is how many times `run` was
+ * actually called; `timedOut` reports whether the final failing attempt was
+ * aborted by its timeout. Both are recorded on the {@link StepReport}.
  */
 type RunOutcome =
   | { ok: true; attempts: number }
-  | { ok: false; attempts: number; error: unknown };
+  | { ok: false; attempts: number; error: unknown; timedOut: boolean };
+
+/**
+ * Outcome of a single `run` attempt (section 1.2): success, or a failure tagged
+ * with whether the per-attempt timeout fired.
+ */
+type AttemptResult =
+  | { ok: true }
+  | { ok: false; error: unknown; timedOut: boolean };
 
 /**
  * An ordered, named collection of steps (section 3.2). It threads one context through
@@ -217,6 +226,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           steps,
           logger,
           outcome.attempts,
+          outcome.timedOut,
         );
         break;
       }
@@ -335,12 +345,13 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 
   /**
    * Runs a step's `run` under its retry policy (section 1.1). Only `run` is
-   * retried — guards and undos never are. For up to `attempts` tries it calls
-   * `run`; on success it returns the attempt count, and on failure it waits the
-   * computed backoff delay before trying again, surfacing the final attempt's
-   * error once the budget is spent. The inter-attempt delay is passed
-   * `ctx.signal` so a pipeline cancellation can wake it early (section 1.3). A
-   * step with no `retry` runs exactly once (`attempts: 1`).
+   * retried — guards and undos never are. For up to `attempts` tries it runs the
+   * step (each attempt honouring the per-attempt timeout, section 1.2); on
+   * success it returns the attempt count, and on failure it waits the computed
+   * backoff delay before trying again, surfacing the final attempt's error (and
+   * whether it timed out) once the budget is spent. The inter-attempt delay is
+   * passed the pipeline signal so a pipeline cancellation can wake it early
+   * (section 1.3). A step with no `retry` runs exactly once (`attempts: 1`).
    */
   private async executeStepRun(
     step: Step<TContext>,
@@ -348,21 +359,73 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   ): Promise<RunOutcome> {
     const retry = step.retry;
     const maxAttempts = retry?.attempts ?? 1;
+    // The pipeline-level signal. `runAttempt` restores it after each attempt, so
+    // a per-attempt timeout signal never leaks into the next attempt or the
+    // retry delay; every attempt re-combines from this clean base.
+    const baseSignal = ctx.signal;
     for (let attempt = 1; ; attempt++) {
+      const result = await this.runAttempt(step, ctx, baseSignal);
+      if (result.ok) {
+        return { ok: true, attempts: attempt };
+      }
+      // No retry policy, or the budget is spent: surface this final failure.
+      // (Testing `retry === undefined` first also narrows it below.)
+      if (retry === undefined || attempt >= maxAttempts) {
+        return {
+          ok: false,
+          attempts: attempt,
+          error: result.error,
+          timedOut: result.timedOut,
+        };
+      }
+      const delayMs = computeRetryDelay(retry, attempt - 1);
+      if (delayMs > 0) {
+        await sleep(delayMs, undefined, { signal: baseSignal });
+      }
+    }
+  }
+
+  /**
+   * Runs a single attempt of a step's `run`, applying its per-attempt timeout
+   * (section 1.2) when configured. With no timeout, `run` is awaited directly and
+   * `ctx.signal` stays the pipeline signal — existing behaviour, unchanged. With
+   * a timeout, a fresh combined signal `AbortSignal.any([AbortSignal.timeout(t),
+   * baseSignal])` is exposed as `ctx.signal` (so `run` can observe it) and `run`
+   * is raced against it; if the timeout — or a pipeline cancel — fires first, the
+   * race rejects with the signal's `reason` (a `TimeoutError` DOMException when
+   * the timeout fired). `ctx.signal` is restored to the pipeline signal
+   * afterwards. `timedOut` reflects whether the per-attempt timeout fired.
+   */
+  private async runAttempt(
+    step: Step<TContext>,
+    ctx: TContext,
+    baseSignal: AbortSignal,
+  ): Promise<AttemptResult> {
+    if (step.timeout === undefined) {
       try {
         await step.run(ctx);
-        return { ok: true, attempts: attempt };
+        return { ok: true };
       } catch (error) {
-        // No retry policy, or the budget is spent: surface this final error.
-        // (Testing `retry === undefined` first also narrows it below.)
-        if (retry === undefined || attempt >= maxAttempts) {
-          return { ok: false, attempts: attempt, error };
-        }
-        const delayMs = computeRetryDelay(retry, attempt - 1);
-        if (delayMs > 0) {
-          await sleep(delayMs, undefined, { signal: ctx.signal });
-        }
+        return { ok: false, error, timedOut: false };
       }
+    }
+    const timeoutSignal = AbortSignal.timeout(step.timeout);
+    const combined = AbortSignal.any([timeoutSignal, baseSignal]);
+    setContextSignal(ctx, combined);
+    try {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        combined.addEventListener('abort', () => reject(combined.reason), {
+          once: true,
+        });
+      });
+      await Promise.race([Promise.resolve(step.run(ctx)), timeoutPromise]);
+      return { ok: true };
+    } catch (error) {
+      // The per-attempt timeout firing is what defines a timeout, regardless of
+      // which racer rejected first.
+      return { ok: false, error, timedOut: timeoutSignal.aborted };
+    } finally {
+      setContextSignal(ctx, baseSignal);
     }
   }
 
@@ -372,7 +435,8 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    * the lifecycle at `debug` with names/types only (section 1.10), and returns the
    * failure so `execute` can fire `onError` and roll back. `attempts` is recorded
    * when the failure came from a step's `run` (a guard failure leaves it unset,
-   * since `run` was never reached).
+   * since `run` was never reached); `timedOut` marks a run aborted by its
+   * per-attempt timeout (section 1.2).
    */
   private recordFailure(
     step: Step<TContext>,
@@ -381,6 +445,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     steps: StepReport[],
     logger: Logger,
     attempts?: number,
+    timedOut?: boolean,
   ): Failure<TContext> {
     const error = new StepError(step.name, { cause: raw });
     const report: StepReport = {
@@ -391,6 +456,9 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     };
     if (attempts !== undefined) {
       report.attempts = attempts;
+    }
+    if (timedOut) {
+      report.timedOut = true;
     }
     steps.push(report);
     logger.debug('step failed', {
@@ -490,6 +558,16 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       }
     }
   }
+}
+
+/**
+ * Reassigns the run-scoped `signal` on the context. To consumers `ctx.signal` is
+ * `readonly` (section 1.5), but the pipeline swaps it to a per-attempt combined
+ * timeout/cancellation signal during a timed run (section 1.2) and restores it
+ * afterwards. The context is per-`execute`, so this stays re-entrancy-safe.
+ */
+function setContextSignal(ctx: BaseContext, signal: AbortSignal): void {
+  (ctx as { signal: AbortSignal }).signal = signal;
 }
 
 /**
