@@ -51,11 +51,21 @@ interface Completed<TContext extends BaseContext> {
  * Outcome of running a step's `run` under its retry policy (section 1.1) and
  * per-attempt timeout (section 1.2). `attempts` is how many times `run` was
  * actually called; `timedOut` reports whether the final failing attempt was
- * aborted by its timeout. Both are recorded on the {@link StepReport}.
+ * aborted by its timeout — both are recorded on the {@link StepReport}. The
+ * `cancelled` variant is returned when a pipeline cancellation woke a retry
+ * delay (section 1.3): the run did not complete and is not a step failure, so
+ * `execute` stops and rolls back rather than recording a failure.
  */
 type RunOutcome =
   | { ok: true; attempts: number }
-  | { ok: false; attempts: number; error: unknown; timedOut: boolean };
+  | { ok: false; cancelled: true }
+  | {
+      ok: false;
+      cancelled: false;
+      attempts: number;
+      error: unknown;
+      timedOut: boolean;
+    };
 
 /**
  * Outcome of a single `run` attempt (section 1.2): success, or a failure tagged
@@ -172,8 +182,22 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     // Walked newest-first during rollback (section 1.7); local for re-entrancy (section 3.2).
     const completed: Completed<TContext>[] = [];
     let failure: Failure<TContext> | null = null;
+    // Set when a pipeline cancellation is detected (section 1.3) — between steps,
+    // or when a retry delay is woken by the signal. Holds the abort reason, which
+    // is surfaced as `result.error`.
+    let cancellation: { reason: Error } | null = null;
 
-    for (const step of this.steps) {
+    for (let i = 0; i < this.steps.length; i++) {
+      const step = this.steps[i]!;
+      // Pipeline cancellation is checked only *between* steps (section 1.3); we
+      // never interrupt user code mid-run. If the signal is already aborted, this
+      // step and every remaining one are skipped as 'cancelled', then completed
+      // steps roll back with the abort reason.
+      if (ctx.signal.aborted) {
+        cancellation = { reason: ctx.signal.reason };
+        this.markCancelled(i, steps, logger);
+        break;
+      }
       // The guard is the only flow-control mechanism (section 1.8); a throwing guard is
       // treated as a step failure (section 7 Phase 4). Evaluate it before any hook.
       let shouldRun = true;
@@ -219,6 +243,13 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       const outcome = await this.executeStepRun(step, ctx);
       const durationMs = performance.now() - start;
       if (!outcome.ok) {
+        if (outcome.cancelled) {
+          // A cancel woke this step's retry delay (section 1.3): stop and roll
+          // back. The step is recorded 'cancelled' alongside the remaining ones.
+          cancellation = { reason: ctx.signal.reason };
+          this.markCancelled(i, steps, logger);
+          break;
+        }
         failure = this.recordFailure(
           step,
           outcome.error,
@@ -253,6 +284,26 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         step.name,
         logger,
       );
+    }
+
+    if (cancellation) {
+      // Cancellation rolls back completed steps exactly like a failure (section
+      // 1.3) but fires no `onError`: there is no originating step failure, and
+      // the pre-aborted case has no step to hand the hook. The abort reason is
+      // surfaced unwrapped as `result.error` (and `PipelineError.cause` under
+      // `throwOnError`) — not wrapped in a StepError.
+      const rollbackErrors = await this.rollback(completed, ctx, logger);
+      const result: Result<TContext> = {
+        ok: false,
+        context: ctx,
+        steps,
+        error: cancellation.reason,
+        rollbackErrors,
+      };
+      if (options.throwOnError) {
+        throw this.toPipelineError(result);
+      }
+      return result;
     }
 
     if (failure) {
@@ -373,6 +424,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       if (retry === undefined || attempt >= maxAttempts) {
         return {
           ok: false,
+          cancelled: false,
           attempts: attempt,
           error: result.error,
           timedOut: result.timedOut,
@@ -380,7 +432,15 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       }
       const delayMs = computeRetryDelay(retry, attempt - 1);
       if (delayMs > 0) {
-        await sleep(delayMs, undefined, { signal: baseSignal });
+        try {
+          await sleep(delayMs, undefined, { signal: baseSignal });
+        } catch {
+          // `node:timers/promises` setTimeout rejects only when its signal
+          // aborts, so a rejection here means the pipeline was cancelled during
+          // the retry delay (section 1.3): the woken delay's AbortError is a
+          // cancellation, not a step failure (`baseSignal.aborted` is true).
+          return { ok: false, cancelled: true };
+        }
       }
     }
   }
@@ -467,6 +527,33 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       ...describeError(raw),
     });
     return { error, step };
+  }
+
+  /**
+   * Records the steps cancelled by a pipeline cancellation (section 1.3):
+   * `this.steps[fromIndex..]` — the step whose turn it was when the abort was
+   * seen, plus every step after it — are pushed as `'skipped'` with
+   * `skipReason: 'cancelled'`. These steps never completed, so there is nothing
+   * to compensate for them; completed steps roll back separately.
+   */
+  private markCancelled(
+    fromIndex: number,
+    steps: StepReport[],
+    logger: Logger,
+  ): void {
+    for (let i = fromIndex; i < this.steps.length; i++) {
+      const step = this.steps[i]!;
+      steps.push({
+        name: step.name,
+        status: 'skipped',
+        durationMs: 0,
+        skipReason: 'cancelled',
+      });
+      logger.debug('step skipped', {
+        stepName: step.name,
+        status: 'skipped',
+      });
+    }
   }
 
   /**
