@@ -48,3 +48,20 @@ While in `0.x`, minor versions may include breaking changes.
   `UsageError`.
 
 [0.1.2]: https://github.com/zaier84/penstock/releases/tag/v0.1.2
+
+## [0.2.0] - 2026-06-21
+
+### Added
+
+- Per-step retry with configurable attempts, delay, fixed/exponential
+  backoff, and optional jitter (`retry` option on `Step`).
+- Per-step timeout using `AbortSignal.timeout()` (`timeout` option on
+  `Step`, applies per attempt).
+- Pipeline-level cancellation via `AbortSignal` passed to `execute()`.
+- `ctx.signal: AbortSignal` always present on context; forwards timeout
+  and cancellation into step `run` functions.
+- `StepReport.attempts` — number of times `run` was called.
+- `StepReport.timedOut` — `true` when the step failed due to a timeout.
+- `RetryOptions` exported as a public type.
+
+[0.2.0]: https://github.com/zaier84/penstock/releases/tag/v0.2.0

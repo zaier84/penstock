@@ -20,6 +20,8 @@ describe('generic context inference (section 3.3)', () => {
       expectTypeOf(ctx.input).toEqualTypeOf<OrderInput>();
       expectTypeOf(ctx.total).toEqualTypeOf<number | undefined>();
       expectTypeOf(ctx.reservationId).toEqualTypeOf<string | undefined>();
+      // Cancellation/timeout signal is always present and non-optional (section 1.5).
+      expectTypeOf(ctx.signal).toEqualTypeOf<AbortSignal>();
       // @ts-expect-error — fields not declared on OrderCtx do not exist.
       void ctx.nonexistent;
     });

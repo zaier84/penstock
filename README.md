@@ -252,6 +252,75 @@ the original thrown error. If you prefer `try/catch`, pass `{ throwOnError: true
 `PipelineError` is thrown instead, carrying the full `.result`, the originating `.cause`, and — when
 any `undo` failed — a native `AggregateError` on `.rollbackErrors`.
 
+## Reliability
+
+penstock adds three opt-in reliability controls: per-step **retry**, per-step **timeout**, and
+pipeline-level **cancellation**. They compose — a single step can carry both `retry` and `timeout`,
+and any pipeline can be cancelled mid-flight — and they never change behaviour unless you ask for
+them.
+
+### Retry
+
+Give a step a `retry` policy and its `run` is re-invoked on failure. `attempts` is the **total**
+number of tries including the first, so `attempts: 3` means one try plus up to two retries. Delays
+between attempts are `'fixed'` (default) or `'exponential'`, with optional `jitter`. Only `run` is
+retried — a `when` guard and an `undo` are never retried.
+
+```ts
+const fetchInventory = new Step<OrderCtx>('fetch-inventory', {
+  run: async (ctx) => {
+    ctx.inventoryToken = await inventory.reserve(ctx.input.items);
+  },
+  retry: { attempts: 3, delayMs: 500, backoff: 'exponential' },
+});
+```
+
+The resulting `StepReport.attempts` records how many times `run` was actually called — a step that
+succeeded on its third try reports `attempts: 3`.
+
+### Timeout
+
+`timeout` bounds a single attempt in milliseconds. When it elapses, the attempt rejects with a
+`TimeoutError`, the step is marked `'failed'`, and `StepReport.timedOut` is `true`. It applies **per
+attempt**, so it composes with `retry` — each try gets the full timeout.
+
+```ts
+const charge = new Step<OrderCtx>('charge-payment', {
+  run: (ctx) => payments.charge(ctx.input.amount),
+  timeout: 5000, // each attempt gets 5s
+});
+```
+
+### Cancellation
+
+Pass an `AbortSignal` to `execute` and the pipeline stops when it aborts. The signal is checked
+**between steps** — a step that is already running is never interrupted mid-flight; the _next_
+between-step check stops the pipeline. On cancellation, completed steps are **rolled back** exactly
+like a failure (reverse order, best-effort) and the abort reason is surfaced as `result.error`.
+
+```ts
+const controller = new AbortController();
+const result = await orderPipeline.execute(order, {
+  signal: controller.signal,
+});
+// ...elsewhere: controller.abort(new Error('customer cancelled'));
+```
+
+The same signal is forwarded onto `ctx.signal`, so a long-running step can observe it and bail out of
+its own async work cooperatively (a timeout aborts `ctx.signal` the same way):
+
+```ts
+new Step<OrderCtx>('reindex', async (ctx) => {
+  for (const batch of batches) {
+    if (ctx.signal.aborted) return; // stop early on cancellation / timeout
+    await indexer.write(batch);
+  }
+});
+```
+
+A full, runnable example combining all three lives in
+[`examples/reliability.ts`](./examples/reliability.ts) — run it with `npm run example:reliability`.
+
 ## Dry-run
 
 `execute(input, { dryRun: true })` **plans without executing**: it builds the context, evaluates each
@@ -300,11 +369,16 @@ in a downstream step once you know an earlier step has set the field.
 
 ### `Step<TContext>`
 
-- `new Step(name, runFn)` or `new Step(name, { run, when?, undo? })`. `name` must be a non-empty,
-  non-reserved string; a missing `run` or an unsafe name throws `UsageError`.
+- `new Step(name, runFn)` or `new Step(name, { run, when?, undo?, retry?, timeout? })`. `name` must
+  be a non-empty, non-reserved string; a missing `run` or an unsafe name throws `UsageError`.
 - `run(ctx) => void | Promise<void>` — the work; mutates `ctx`.
 - `when(ctx) => boolean | Promise<boolean>` — optional pure guard; a falsy result skips the step.
 - `undo(ctx) => void | Promise<void>` — optional compensation, run during rollback.
+- `retry?: { attempts; delayMs?; backoff?; jitter? }` — re-invokes `run` on failure; `attempts` is
+  total tries including the first, `backoff` is `'fixed'` (default) or `'exponential'` (see
+  `RetryOptions`). Only `run` is retried.
+- `timeout?: number` — per-attempt timeout in milliseconds (`> 0`); a timed-out attempt fails the
+  step and sets `StepReport.timedOut`.
 - `.when(fn)` — returns a **new** `Step` with the guard set (original untouched); replaces any prior
   guard rather than combining them.
 
@@ -317,7 +391,7 @@ in a downstream step once you know an earlier step has set the field.
   `onError(error, ctx, step)`. Hook throws are contained and never change the outcome.
 - `.useEngine(engine)` — registers a pipeline-scoped engine (shadows a global of the same name).
 - `.execute(input, options?)` — runs the flow, returns `Promise<Result<TContext>>`.
-  `options: { throwOnError?: boolean; dryRun?: boolean; logger?: Logger }`.
+  `options: { throwOnError?: boolean; dryRun?: boolean; logger?: Logger; signal?: AbortSignal }`.
 - All builder methods are chainable.
 
 ### `Engine`
@@ -367,7 +441,9 @@ interface StepReport {
   status: StepStatus;
   durationMs: number; // 0 for skipped / would-run
   error?: Error; // present for 'failed' and 'rollback-failed'
-  skipReason?: string; // present for 'skipped'
+  skipReason?: string; // present for 'skipped' (e.g. 'cancelled')
+  attempts?: number; // times run was called; set for steps that ran (>= 1)
+  timedOut?: boolean; // true when the step failed due to a timeout
 }
 
 type StepStatus =
@@ -410,8 +486,9 @@ versions may include breaking changes**; `1.0.0` will mark API stability. The
 
 Post-MVP ideas, explicitly out of scope today:
 
-- [ ] Per-step retries with backoff, and per-step timeouts
-- [ ] `AbortSignal` cancellation between steps
+- [x] Per-step retries with backoff
+- [x] Per-step timeouts
+- [x] `AbortSignal` cancellation between steps
 - [ ] Parallel step groups (`addParallel([...])`)
 - [ ] Cross-pipeline context flow in `UseCase`
 - [ ] Richer dry-run that executes `sideEffectFree`-flagged steps
