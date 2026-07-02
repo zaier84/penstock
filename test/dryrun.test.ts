@@ -29,6 +29,7 @@ describe('dry-run planning (section 1.2)', () => {
     expect(result.ok).toBe(true);
     expect(result.error).toBeNull();
     expect(result.rollbackErrors).toEqual([]);
+    expect(result.aborted).toBe(false);
     expect(result.steps.map((s) => s.status)).toEqual([
       'would-run',
       'would-run',

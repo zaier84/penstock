@@ -13,6 +13,7 @@ import type {
   AfterHook,
   BeforeHook,
   ErrorHook,
+  PipelineEntry,
   Result,
   RetryOptions,
   StepReport,
@@ -29,8 +30,9 @@ export interface ExecuteOptions {
   logger?: Logger;
   /**
    * Pipeline-level cancellation signal (section 1.3). It is threaded onto
-   * `ctx.signal` so steps can forward it into their own async work; the
-   * between-step cancellation check that acts on it arrives in a later phase.
+   * `ctx.signal` so steps can forward it into their own async work, and it is
+   * checked between entries — an aborted signal stops the pipeline, skips the
+   * remaining steps as `'cancelled'`, and rolls back completed ones.
    */
   signal?: AbortSignal;
 }
@@ -52,9 +54,10 @@ interface Completed<TContext extends BaseContext> {
  * per-attempt timeout (section 1.2). `attempts` is how many times `run` was
  * actually called; `timedOut` reports whether the final failing attempt was
  * aborted by its timeout — both are recorded on the {@link StepReport}. The
- * `cancelled` variant is returned when a pipeline cancellation woke a retry
- * delay (section 1.3): the run did not complete and is not a step failure, so
- * `execute` stops and rolls back rather than recording a failure.
+ * `cancelled` variant is returned when the step's base signal ended the run —
+ * a pipeline cancellation, or (for a parallel step) the group abort after a
+ * peer failed: the run did not complete and is not a step failure, so the
+ * caller stops rather than recording a failure.
  */
 type RunOutcome =
   | { ok: true; attempts: number }
@@ -76,20 +79,72 @@ type AttemptResult =
   | { ok: false; error: unknown; timedOut: boolean };
 
 /**
+ * Outcome of executing one pipeline entry — a sequential step or a parallel
+ * group. `failed` carries the originating failures in declaration order:
+ * exactly one for a sequential entry, one per failed step for a parallel group
+ * (`result.error` is always the first). `cancelled` reports a pipeline
+ * cancellation observed through the entry (section 1.3); the entry has already
+ * pushed reports for its own steps, so `execute` marks only the entries after
+ * it.
+ */
+type EntryOutcome<TContext extends BaseContext> =
+  | { status: 'continue' }
+  | { status: 'failed'; failures: Failure<TContext>[] }
+  | { status: 'cancelled'; reason: Error };
+
+/**
+ * Settled state of one launched parallel step, keyed by its position in the
+ * group. Filled as each task settles (completion order), then read back in
+ * declaration order after `Promise.allSettled` so reports and rollback stay
+ * deterministic (0.3.0 spec, sections 1.1.3 and 1.1.5).
+ */
+type ParallelSlot =
+  | { kind: 'completed'; attempts: number; durationMs: number }
+  | {
+      kind: 'failed';
+      error: StepError;
+      attempts: number;
+      timedOut: boolean;
+      durationMs: number;
+    }
+  | { kind: 'cancelled' };
+
+/**
+ * How {@link Pipeline.executeStepRun} is being driven, which decides two
+ * behaviours that must differ between the executors:
+ *
+ * - `'sequential'` — the step owns the run exclusively: a timed attempt swaps
+ *   `ctx.signal` to a per-attempt combined signal (section 1.2), and *any*
+ *   abort of the base signal seen through a failed attempt is a pipeline
+ *   cancellation (section 1.3) — nothing else can abort it.
+ * - `'parallel'` — concurrent steps share one `ctx`, so `ctx.signal` stays the
+ *   group-combined signal for the whole group (never swapped per attempt), and
+ *   the base signal also aborts when a *peer* fails (0.3.0 spec, section
+ *   1.1.3). A failed attempt is then classified as cancelled only when the
+ *   rejection *is* the abort reason (a cooperative run forwarding
+ *   `ctx.signal`); a step's own genuine failure that merely races the group
+ *   abort stays a failure.
+ */
+type RunMode = 'sequential' | 'parallel';
+
+/**
  * An ordered, named collection of steps (section 3.2). It threads one context through
- * its steps, evaluates guards, fires observer hooks, runs steps in sequence,
- * and — when a step fails — performs best-effort, reverse-order rollback (section 1.7)
- * before returning a structured {@link Result}. The instance holds only
- * immutable config; every piece of per-run state lives in
- * {@link Pipeline.execute}-local variables, so a pipeline is safe to `execute`
- * repeatedly and concurrently (section 3.2 re-entrancy).
+ * its entries — sequential steps and parallel groups (0.3.0 spec, section 1.1)
+ * — evaluates guards, fires observer hooks, and — when a step fails —
+ * performs best-effort, reverse-order rollback (section 1.7) before returning
+ * a structured {@link Result}. The instance holds only immutable config; every
+ * piece of per-run state lives in {@link Pipeline.execute}-local variables, so
+ * a pipeline is safe to `execute` repeatedly and concurrently (section 3.2
+ * re-entrancy).
  *
  * Pipeline-scoped engines (section 3.5) shadow the global registry, and `dryRun`
  * planning is available via {@link Pipeline.execute} (section 1.2).
  */
 export class Pipeline<TContext extends BaseContext = BaseContext> {
   readonly name: string;
-  private readonly steps: Step<TContext>[] = [];
+  // The execution sequence: sequential steps and parallel groups, each
+  // occupying one position (0.3.0 spec, section 1.1.6).
+  private readonly entries: PipelineEntry<TContext>[] = [];
   // Step-name dedup uses a Set, never a user-keyed plain object (section 1.10).
   private readonly stepNames = new Set<string>();
   // Pipeline-scoped engines, Map-backed for the same reason (section 1.10). Build-time
@@ -106,8 +161,8 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   }
 
   /**
-   * Appends a step. Throws a `UsageError` synchronously if `step` is not a
-   * `Step` or its name duplicates one already in this pipeline (section 3.2).
+   * Appends a sequential step. Throws a `UsageError` synchronously if `step` is
+   * not a `Step` or its name duplicates one already in this pipeline (section 3.2).
    */
   addStep(step: Step<TContext>): this {
     if (!(step instanceof Step)) {
@@ -119,7 +174,39 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       );
     }
     this.stepNames.add(step.name);
-    this.steps.push(step);
+    this.entries.push({ kind: 'sequential', step });
+    return this;
+  }
+
+  /**
+   * Inserts a parallel group (0.3.0 spec, section 1.1): the given steps run
+   * concurrently, occupying one logical position in the pipeline. Requires at
+   * least 2 steps, each a `Step` whose name is unique across the whole
+   * pipeline. The group is validated in full before any of it is registered,
+   * so a throwing call leaves the pipeline unchanged. Chainable.
+   */
+  addParallel(steps: Step<TContext>[]): this {
+    if (!Array.isArray(steps) || steps.length < 2) {
+      throw new UsageError(
+        `Pipeline "${this.name}" addParallel requires at least 2 steps`,
+      );
+    }
+    const incoming = new Set<string>();
+    for (const step of steps) {
+      if (!(step instanceof Step)) {
+        throw new UsageError('Pipeline.addParallel expects Step instances');
+      }
+      if (this.stepNames.has(step.name) || incoming.has(step.name)) {
+        throw new UsageError(
+          `Pipeline "${this.name}" already has a step named "${step.name}"`,
+        );
+      }
+      incoming.add(step.name);
+    }
+    for (const name of incoming) {
+      this.stepNames.add(name);
+    }
+    this.entries.push({ kind: 'parallel', steps: [...steps] });
     return this;
   }
 
@@ -152,13 +239,13 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   }
 
   /**
-   * Builds a fresh context for this call, runs each step in order, and resolves
+   * Builds a fresh context for this call, runs each entry in order, and resolves
    * with a {@link Result}. On a step failure the flow aborts, `onError` fires
-   * once, completed steps are compensated in reverse order (section 1.7), and the
-   * `Result` carries `ok:false` with the failure and any rollback errors. With
-   * `{ throwOnError: true }` the same failure is thrown as a {@link PipelineError}
-   * instead. With `{ dryRun: true }` it plans instead of executing (section 1.2). Per
-   * section 3.2 all run state is local to this method.
+   * per originating failure, completed steps are compensated in reverse order
+   * (section 1.7), and the `Result` carries `ok:false` with the failure and any
+   * rollback errors. With `{ throwOnError: true }` the same failure is thrown as
+   * a {@link PipelineError} instead. With `{ dryRun: true }` it plans instead of
+   * executing (section 1.2). Per section 3.2 all run state is local to this method.
    */
   async execute(
     input: TContext['input'],
@@ -178,112 +265,60 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       return this.plan(ctx, logger);
     }
     const steps: StepReport[] = [];
-    // Steps whose `run` completed, in execution order, each with its report.
-    // Walked newest-first during rollback (section 1.7); local for re-entrancy (section 3.2).
+    // Steps whose `run` completed, in execution order — parallel steps are
+    // registered in declaration order once their group settles. Walked
+    // newest-first during rollback (section 1.7); local for re-entrancy (section 3.2).
     const completed: Completed<TContext>[] = [];
-    let failure: Failure<TContext> | null = null;
-    // Set when a pipeline cancellation is detected (section 1.3) — between steps,
-    // or when a retry delay is woken by the signal. Holds the abort reason, which
-    // is surfaced as `result.error`.
+    // Originating failures, in declaration order. A sequential entry
+    // contributes at most one; a parallel group may contribute one per failed
+    // step. `result.error` is always the first.
+    let failures: Failure<TContext>[] = [];
+    // Set when a pipeline cancellation is detected (section 1.3) — between
+    // entries, during a retry delay, or mid-parallel-group. Holds the abort
+    // reason, which is surfaced as `result.error`.
     let cancellation: { reason: Error } | null = null;
 
-    for (let i = 0; i < this.steps.length; i++) {
-      const step = this.steps[i]!;
-      // Pipeline cancellation is checked only *between* steps (section 1.3); we
+    for (let i = 0; i < this.entries.length; i++) {
+      // Pipeline cancellation is checked only *between* entries (section 1.3); we
       // never interrupt user code mid-run. If the signal is already aborted, this
-      // step and every remaining one are skipped as 'cancelled', then completed
+      // entry and every remaining one are skipped as 'cancelled', then completed
       // steps roll back with the abort reason.
       if (ctx.signal.aborted) {
         cancellation = { reason: ctx.signal.reason };
         this.markCancelled(i, steps, logger);
         break;
       }
-      // The guard is the only flow-control mechanism (section 1.8); a throwing guard is
-      // treated as a step failure (section 7 Phase 4). Evaluate it before any hook.
-      let shouldRun = true;
-      if (step.guard) {
-        const guardStart = performance.now();
-        try {
-          shouldRun = await step.guard(ctx);
-        } catch (raw) {
-          failure = this.recordFailure(
-            step,
-            raw,
-            performance.now() - guardStart,
-            steps,
-            logger,
-          );
-          break;
-        }
-      }
-      if (!shouldRun) {
-        steps.push({
-          name: step.name,
-          status: 'skipped',
-          durationMs: 0,
-          skipReason: 'guard returned false',
-        });
-        logger.debug('step skipped', {
-          stepName: step.name,
-          status: 'skipped',
-        });
-        continue;
-      }
-
-      await this.runHooks(
-        this.beforeHooks,
-        (hook) => hook(ctx, step),
-        'before',
-        step.name,
-        logger,
-      );
-
-      const start = performance.now();
-      // Run with the step's retry policy (section 1.1); only `run` is retried.
-      const outcome = await this.executeStepRun(step, ctx);
-      const durationMs = performance.now() - start;
-      if (!outcome.ok) {
-        if (outcome.cancelled) {
-          // A cancel woke this step's retry delay (section 1.3): stop and roll
-          // back. The step is recorded 'cancelled' alongside the remaining ones.
-          cancellation = { reason: ctx.signal.reason };
-          this.markCancelled(i, steps, logger);
-          break;
-        }
-        failure = this.recordFailure(
-          step,
-          outcome.error,
-          durationMs,
+      const entry = this.entries[i]!;
+      let outcome: EntryOutcome<TContext>;
+      if (entry.kind === 'sequential') {
+        outcome = await this.executeSequentialEntry(
+          entry.step,
+          ctx,
           steps,
+          completed,
           logger,
-          outcome.attempts,
-          outcome.timedOut,
         );
+      } else {
+        outcome = await this.executeParallelEntry(
+          entry.steps,
+          ctx,
+          steps,
+          completed,
+          logger,
+        );
+      }
+      if (outcome.status === 'failed') {
+        failures = outcome.failures;
         break;
       }
-
-      // Keep the report by reference so rollback can flip its status in place.
-      const report: StepReport = {
-        name: step.name,
-        status: 'completed',
-        durationMs,
-        attempts: outcome.attempts,
-      };
-      steps.push(report);
-      completed.push({ step, report });
-      logger.debug('step completed', {
-        stepName: step.name,
-        status: 'completed',
-        durationMs,
-      });
-
-      await this.runHooks(
-        this.afterHooks,
-        (hook) => hook(ctx, step, { status: 'completed', durationMs }),
-        'after',
-        step.name,
-        logger,
-      );
+      if (outcome.status === 'cancelled') {
+        // The entry saw the cancel itself (a woken retry delay, a cooperative
+        // run, or a cancel during a parallel group) and has already reported
+        // its own steps; mark only the entries after it.
+        cancellation = { reason: outcome.reason };
+        this.markCancelled(i + 1, steps, logger);
+        break;
+      }
     }
 
     if (cancellation) {
@@ -299,6 +334,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         steps,
         error: cancellation.reason,
         rollbackErrors,
+        aborted: true,
       };
       if (options.throwOnError) {
         throw this.toPipelineError(result);
@@ -306,23 +342,26 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       return result;
     }
 
-    if (failure) {
-      const { error, step } = failure;
-      // `onError` fires once, for the originating failure, BEFORE rollback (section 1.7).
-      await this.runHooks(
-        this.errorHooks,
-        (hook) => hook(error, ctx, step),
-        'onError',
-        step.name,
-        logger,
-      );
+    if (failures.length > 0) {
+      // `onError` fires BEFORE rollback (section 1.7), once per originating
+      // failure — a parallel group may have several, in declaration order.
+      for (const { error, step } of failures) {
+        await this.runHooks(
+          this.errorHooks,
+          (hook) => hook(error, ctx, step),
+          'onError',
+          step.name,
+          logger,
+        );
+      }
       const rollbackErrors = await this.rollback(completed, ctx, logger);
       const result: Result<TContext> = {
         ok: false,
         context: ctx,
         steps,
-        error,
+        error: failures[0]!.error,
         rollbackErrors,
+        aborted: false,
       };
       if (options.throwOnError) {
         throw this.toPipelineError(result);
@@ -330,56 +369,415 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       return result;
     }
 
-    return { ok: true, context: ctx, steps, error: null, rollbackErrors: [] };
+    return {
+      ok: true,
+      context: ctx,
+      steps,
+      error: null,
+      rollbackErrors: [],
+      aborted: false,
+    };
   }
 
   /**
-   * Dry-run planner (section 1.2): planning, not execution — it produces no side
-   * effects. It evaluates each step's guard and records the ordered plan,
-   * marking each step `'would-run'` or `'skipped'` (with `skipReason`), and
-   * never calls a `run` or `undo`. A guard that itself throws is treated as a
-   * step failure (`'failed'`, `ok:false`) and planning stops there. Hooks are
-   * execution observers, so they do not fire while planning.
+   * Executes one sequential step: guard, `before` hooks, the run under its
+   * retry/timeout policy, then the report and `after` hooks. A throwing guard
+   * is a step failure — the guard is the only flow-control mechanism (section
+   * 1.8) and is evaluated before any hook. A cancellation surfacing through
+   * the run (a woken retry delay or a cooperative run, section 1.3) records
+   * the step as `'cancelled'` and stops the pipeline.
    */
-  private async plan(ctx: TContext, logger: Logger): Promise<Result<TContext>> {
-    const steps: StepReport[] = [];
-    let failure: Failure<TContext> | null = null;
+  private async executeSequentialEntry(
+    step: Step<TContext>,
+    ctx: TContext,
+    steps: StepReport[],
+    completed: Completed<TContext>[],
+    logger: Logger,
+  ): Promise<EntryOutcome<TContext>> {
+    let shouldRun = true;
+    if (step.guard) {
+      const guardStart = performance.now();
+      try {
+        shouldRun = await step.guard(ctx);
+      } catch (raw) {
+        return {
+          status: 'failed',
+          failures: [
+            this.recordFailure(
+              step,
+              raw,
+              performance.now() - guardStart,
+              steps,
+              logger,
+            ),
+          ],
+        };
+      }
+    }
+    if (!shouldRun) {
+      this.pushGuardSkip(step, steps, logger);
+      return { status: 'continue' };
+    }
 
-    for (const step of this.steps) {
+    await this.runHooks(
+      this.beforeHooks,
+      (hook) => hook(ctx, step),
+      'before',
+      step.name,
+      logger,
+    );
+
+    const start = performance.now();
+    // Run with the step's retry policy (section 1.1); only `run` is retried.
+    const outcome = await this.executeStepRun(
+      step,
+      ctx,
+      ctx.signal,
+      'sequential',
+    );
+    const durationMs = performance.now() - start;
+    if (!outcome.ok) {
+      if (outcome.cancelled) {
+        // The step never completed, so it is recorded 'cancelled' alongside
+        // the entries `execute` marks after it (section 1.3).
+        steps.push({
+          name: step.name,
+          status: 'skipped',
+          durationMs: 0,
+          skipReason: 'cancelled',
+        });
+        logger.debug('step skipped', {
+          stepName: step.name,
+          status: 'skipped',
+        });
+        return { status: 'cancelled', reason: ctx.signal.reason };
+      }
+      return {
+        status: 'failed',
+        failures: [
+          this.recordFailure(
+            step,
+            outcome.error,
+            durationMs,
+            steps,
+            logger,
+            outcome.attempts,
+            outcome.timedOut,
+          ),
+        ],
+      };
+    }
+
+    // Keep the report by reference so rollback can flip its status in place.
+    const report: StepReport = {
+      name: step.name,
+      status: 'completed',
+      durationMs,
+      attempts: outcome.attempts,
+    };
+    steps.push(report);
+    completed.push({ step, report });
+    logger.debug('step completed', {
+      stepName: step.name,
+      status: 'completed',
+      durationMs,
+    });
+
+    await this.runHooks(
+      this.afterHooks,
+      (hook) => hook(ctx, step, { status: 'completed', durationMs }),
+      'after',
+      step.name,
+      logger,
+    );
+    return { status: 'continue' };
+  }
+
+  /**
+   * Executes a parallel group (0.3.0 spec, sections 1.1.2–1.1.3) in three
+   * phases:
+   *
+   * 1. **Guards, sequentially,** in declaration order, before any concurrent
+   *    work. A falsy guard excludes its step from the batch; a throwing guard
+   *    aborts the whole group before anything runs (steps already
+   *    guard-skipped keep their reports; steps cleared to run never started
+   *    and get none — same as steps after a sequential failure).
+   * 2. **Concurrent execution** of the cleared steps. Every step's runs are
+   *    driven by a signal combining two cancellation levels: a group-scoped
+   *    `AbortController` (aborted as soon as any peer fails) and the pipeline
+   *    signal (external cancellation). `before` hooks fire per step at launch
+   *    (declaration order — launching is sequential; only the runs overlap);
+   *    `after` hooks fire per step as it completes (completion order).
+   *    `Promise.allSettled` — never `Promise.all` — waits for every step to
+   *    settle before anything is classified or rolled back.
+   * 3. **Classification, in declaration order,** so `result.steps[]` and the
+   *    rollback registration are deterministic regardless of completion
+   *    order: completed steps join the rollback list (their reverse walk thus
+   *    undoes the group in reverse declaration order before prior entries),
+   *    failed steps become failures (`result.error` is the first), and steps
+   *    ended by an abort are `'skipped'` — `'cancelled'` if the pipeline was
+   *    cancelled, `'cancelled (parallel peer failed)'` if the group was.
+   *
+   * A pipeline-level cancel observed during the group takes precedence over
+   * coincident step failures (matching the sequential executor): the run is
+   * reported as aborted with the abort reason as `result.error`, though any
+   * genuinely failed steps keep their `'failed'` reports.
+   */
+  private async executeParallelEntry(
+    groupSteps: Step<TContext>[],
+    ctx: TContext,
+    steps: StepReport[],
+    completed: Completed<TContext>[],
+    logger: Logger,
+  ): Promise<EntryOutcome<TContext>> {
+    const pipelineSignal = ctx.signal;
+
+    // -- Phase 1: sequential guard evaluation (section 1.1.2, point 1). --
+    const dispositions: ('run' | 'skip')[] = [];
+    for (const step of groupSteps) {
       let shouldRun = true;
       if (step.guard) {
         const guardStart = performance.now();
         try {
           shouldRun = await step.guard(ctx);
         } catch (raw) {
-          failure = this.recordFailure(
-            step,
-            raw,
-            performance.now() - guardStart,
-            steps,
-            logger,
-          );
-          break;
+          for (let i = 0; i < dispositions.length; i++) {
+            if (dispositions[i] === 'skip') {
+              this.pushGuardSkip(groupSteps[i]!, steps, logger);
+            }
+          }
+          return {
+            status: 'failed',
+            failures: [
+              this.recordFailure(
+                step,
+                raw,
+                performance.now() - guardStart,
+                steps,
+                logger,
+              ),
+            ],
+          };
         }
       }
-      if (!shouldRun) {
+      dispositions.push(shouldRun ? 'run' : 'skip');
+    }
+
+    // -- Phase 2: concurrent execution (section 1.1.2, point 2). --
+    const slots = new Map<number, ParallelSlot>();
+    const runnable: { step: Step<TContext>; index: number }[] = [];
+    for (let i = 0; i < groupSteps.length; i++) {
+      if (dispositions[i] === 'run') {
+        runnable.push({ step: groupSteps[i]!, index: i });
+      }
+    }
+    if (runnable.length > 0) {
+      // Two levels of cancellation (section 1.1.3): a failing peer aborts the
+      // group controller, while an external cancel arrives via the pipeline
+      // signal; every step in the group observes both.
+      const group = new AbortController();
+      const groupSignal = AbortSignal.any([group.signal, pipelineSignal]);
+      // Concurrent steps share the one mutable ctx, so ctx.signal is pinned to
+      // the group-combined signal for the whole group instead of the
+      // per-attempt timeout swap sequential steps get — concurrent swaps of a
+      // shared property would race. Timeouts still enforce via the per-attempt
+      // race inside runAttempt.
+      setContextSignal(ctx, groupSignal);
+      try {
+        const tasks: Promise<void>[] = [];
+        for (const { step, index } of runnable) {
+          await this.runHooks(
+            this.beforeHooks,
+            (hook) => hook(ctx, step),
+            'before',
+            step.name,
+            logger,
+          );
+          tasks.push(
+            this.runParallelStep(
+              step,
+              index,
+              ctx,
+              groupSignal,
+              group,
+              slots,
+              logger,
+            ),
+          );
+        }
+        // Wait for every step to settle — completed, failed, or cancelled —
+        // before classification and rollback (section 1.1.3, point 1).
+        await Promise.allSettled(tasks);
+      } finally {
+        setContextSignal(ctx, pipelineSignal);
+      }
+    }
+
+    // -- Phase 3: classification in declaration order (section 1.1.3, point 2). --
+    const failures: Failure<TContext>[] = [];
+    for (let i = 0; i < groupSteps.length; i++) {
+      const step = groupSteps[i]!;
+      if (dispositions[i] === 'skip') {
+        this.pushGuardSkip(step, steps, logger);
+        continue;
+      }
+      // Every launched step settled into a slot before allSettled resolved.
+      const slot = slots.get(i)!;
+      if (slot.kind === 'completed') {
+        const report: StepReport = {
+          name: step.name,
+          status: 'completed',
+          durationMs: slot.durationMs,
+          attempts: slot.attempts,
+        };
+        steps.push(report);
+        completed.push({ step, report });
+      } else if (slot.kind === 'failed') {
+        const report: StepReport = {
+          name: step.name,
+          status: 'failed',
+          durationMs: slot.durationMs,
+          error: slot.error,
+          attempts: slot.attempts,
+        };
+        if (slot.timedOut) {
+          report.timedOut = true;
+        }
+        steps.push(report);
+        failures.push({ error: slot.error, step });
+      } else {
+        // Ended by an abort mid-flight; the skipReason records which level.
         steps.push({
           name: step.name,
           status: 'skipped',
           durationMs: 0,
-          skipReason: 'guard returned false',
+          skipReason: pipelineSignal.aborted
+            ? 'cancelled'
+            : 'cancelled (parallel peer failed)',
         });
         logger.debug('step skipped', {
           stepName: step.name,
           status: 'skipped',
         });
-        continue;
       }
-      steps.push({ name: step.name, status: 'would-run', durationMs: 0 });
-      logger.debug('step would run', {
-        stepName: step.name,
-        status: 'would-run',
+    }
+
+    if (pipelineSignal.aborted) {
+      return { status: 'cancelled', reason: pipelineSignal.reason };
+    }
+    if (failures.length > 0) {
+      return { status: 'failed', failures };
+    }
+    return { status: 'continue' };
+  }
+
+  /**
+   * Drives one launched parallel step to a settled {@link ParallelSlot} and
+   * fires its per-step observers. On the first failure in the group it aborts
+   * the group controller so in-flight peers that forwarded `ctx.signal` can
+   * stop early (section 1.1.3, point 1) — later failures re-abort harmlessly.
+   * Never rejects: every path stores a slot, which is what allows the group's
+   * `Promise.allSettled` to classify all steps afterwards.
+   */
+  private async runParallelStep(
+    step: Step<TContext>,
+    index: number,
+    ctx: TContext,
+    groupSignal: AbortSignal,
+    group: AbortController,
+    slots: Map<number, ParallelSlot>,
+    logger: Logger,
+  ): Promise<void> {
+    const start = performance.now();
+    const outcome = await this.executeStepRun(
+      step,
+      ctx,
+      groupSignal,
+      'parallel',
+    );
+    const durationMs = performance.now() - start;
+    if (outcome.ok) {
+      slots.set(index, {
+        kind: 'completed',
+        attempts: outcome.attempts,
+        durationMs,
       });
+      logger.debug('step completed', {
+        stepName: step.name,
+        status: 'completed',
+        durationMs,
+      });
+      await this.runHooks(
+        this.afterHooks,
+        (hook) => hook(ctx, step, { status: 'completed', durationMs }),
+        'after',
+        step.name,
+        logger,
+      );
+      return;
+    }
+    if (outcome.cancelled) {
+      slots.set(index, { kind: 'cancelled' });
+      return;
+    }
+    const error = new StepError(step.name, { cause: outcome.error });
+    slots.set(index, {
+      kind: 'failed',
+      error,
+      attempts: outcome.attempts,
+      timedOut: outcome.timedOut,
+      durationMs,
+    });
+    logger.debug('step failed', {
+      stepName: step.name,
+      status: 'failed',
+      ...describeError(outcome.error),
+    });
+    group.abort(error);
+  }
+
+  /**
+   * Dry-run planner (section 1.2): planning, not execution — it produces no side
+   * effects. It evaluates each step's guard (parallel steps sequentially, in
+   * declaration order — 0.3.0 spec, section 1.1.4) and records the ordered
+   * plan, marking each step `'would-run'` or `'skipped'` (with `skipReason`),
+   * and never calls a `run` or `undo`. A guard that itself throws is treated
+   * as a step failure (`'failed'`, `ok:false`) and planning stops there.
+   * Hooks are execution observers, so they do not fire while planning.
+   */
+  private async plan(ctx: TContext, logger: Logger): Promise<Result<TContext>> {
+    const steps: StepReport[] = [];
+    let failure: Failure<TContext> | null = null;
+
+    outer: for (const entry of this.entries) {
+      const group = entry.kind === 'sequential' ? [entry.step] : entry.steps;
+      for (const step of group) {
+        let shouldRun = true;
+        if (step.guard) {
+          const guardStart = performance.now();
+          try {
+            shouldRun = await step.guard(ctx);
+          } catch (raw) {
+            failure = this.recordFailure(
+              step,
+              raw,
+              performance.now() - guardStart,
+              steps,
+              logger,
+            );
+            break outer;
+          }
+        }
+        if (!shouldRun) {
+          this.pushGuardSkip(step, steps, logger);
+          continue;
+        }
+        steps.push({ name: step.name, status: 'would-run', durationMs: 0 });
+        logger.debug('step would run', {
+          stepName: step.name,
+          status: 'would-run',
+        });
+      }
     }
 
     if (failure) {
@@ -389,9 +787,17 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         steps,
         error: failure.error,
         rollbackErrors: [],
+        aborted: false,
       };
     }
-    return { ok: true, context: ctx, steps, error: null, rollbackErrors: [] };
+    return {
+      ok: true,
+      context: ctx,
+      steps,
+      error: null,
+      rollbackErrors: [],
+      aborted: false,
+    };
   }
 
   /**
@@ -400,34 +806,42 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    * step (each attempt honouring the per-attempt timeout, section 1.2); on
    * success it returns the attempt count, and on failure it waits the computed
    * backoff delay before trying again, surfacing the final attempt's error (and
-   * whether it timed out) once the budget is spent. A pipeline cancellation that
-   * surfaces through an attempt or wakes the inter-attempt delay is reported as a
-   * cancellation rather than a failure (section 1.3) — the delay is passed the
-   * pipeline signal so a cancel wakes it early. A step with no `retry` runs
-   * exactly once (`attempts: 1`).
+   * whether it timed out) once the budget is spent.
+   *
+   * `baseSignal` is the pipeline signal for a sequential step, or the
+   * group-combined signal for a parallel one (0.3.0 spec, section 1.1.3); it is
+   * passed to the inter-attempt delay so an abort wakes it early. An abort
+   * surfacing through an attempt or a woken delay yields the `cancelled`
+   * outcome rather than a failure — under which conditions depends on `mode`
+   * (see {@link RunMode}). A step with no `retry` runs exactly once
+   * (`attempts: 1`).
    */
   private async executeStepRun(
     step: Step<TContext>,
     ctx: TContext,
+    baseSignal: AbortSignal,
+    mode: RunMode,
   ): Promise<RunOutcome> {
     const retry = step.retry;
     const maxAttempts = retry?.attempts ?? 1;
-    // The pipeline-level signal. `runAttempt` restores it after each attempt, so
-    // a per-attempt timeout signal never leaks into the next attempt or the
-    // retry delay; every attempt re-combines from this clean base.
-    const baseSignal = ctx.signal;
     for (let attempt = 1; ; attempt++) {
-      const result = await this.runAttempt(step, ctx, baseSignal);
+      const result = await this.runAttempt(step, ctx, baseSignal, mode);
       if (result.ok) {
         return { ok: true, attempts: attempt };
       }
-      // A pipeline cancellation seen through this attempt — a cooperative `run`
-      // that observed `ctx.signal` and rejected, or a cancel coinciding with a
-      // timeout — is a cancellation, not a step failure: stop and roll back
-      // (section 1.3) whatever retry budget remains, and never wrap the abort
-      // reason in a StepError. Cancellation takes precedence over a coincident
-      // timeout.
-      if (baseSignal.aborted) {
+      // An abort seen through a failed attempt is a cancellation, not a step
+      // failure — stop and roll back (section 1.3) whatever retry budget
+      // remains, and never wrap the abort reason in a StepError. Sequentially,
+      // any abort qualifies (only an external cancel can abort the base
+      // signal, and it takes precedence over a coincident timeout); in a
+      // parallel group the base signal also aborts when a *peer* fails, so
+      // only a rejection that IS the abort reason (a cooperative run
+      // forwarding ctx.signal) counts — a step's own failure racing the group
+      // abort stays a failure (0.3.0 spec, section 1.1.3, point 2).
+      if (
+        baseSignal.aborted &&
+        (mode === 'sequential' || result.error === baseSignal.reason)
+      ) {
         return { ok: false, cancelled: true };
       }
       // No retry policy, or the budget is spent: surface this final failure.
@@ -447,9 +861,10 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           await sleep(delayMs, undefined, { signal: baseSignal });
         } catch {
           // `node:timers/promises` setTimeout rejects only when its signal
-          // aborts, so a rejection here means the pipeline was cancelled during
-          // the retry delay (section 1.3): the woken delay's AbortError is a
-          // cancellation, not a step failure (`baseSignal.aborted` is true).
+          // aborts, so a rejection here means the base signal aborted during
+          // the retry delay — a pipeline cancel (section 1.3) or, for a
+          // parallel step, the group abort after a peer failed. Either way
+          // the step is cancelled, not failed.
           return { ok: false, cancelled: true };
         }
       }
@@ -458,22 +873,26 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 
   /**
    * Runs a single attempt of a step's `run`, applying its per-attempt timeout
-   * (section 1.2) when configured. With no timeout, `run` is awaited directly and
-   * `ctx.signal` stays the pipeline signal — existing behaviour, unchanged. With
-   * a timeout, `ctx.signal` is swapped to a fresh combined signal
+   * (section 1.2) when configured. With no timeout, `run` is awaited directly
+   * and `ctx.signal` is left alone. With a timeout, only the **timeout** races
+   * `run`: an abort of the base signal must never interrupt in-flight user
+   * code (section 1.3), so it cannot abandon the run — it is honoured between
+   * entries (and, for a cooperative `run`, by the run rejecting itself), then
+   * classified by {@link Pipeline.executeStepRun}.
+   *
+   * Sequentially, `ctx.signal` is swapped to a fresh per-attempt
    * `AbortSignal.any([AbortSignal.timeout(t), baseSignal])` so a cooperative
-   * `run` can self-abort on either the timeout or a pipeline cancel (section 1.2).
-   * Only the **timeout** races `run`, though: a pipeline cancellation must never
-   * interrupt in-flight user code (section 1.3), so it cannot abandon the run —
-   * it is honoured by the between-step check (and, for a cooperative `run`, by
-   * the run rejecting itself), then classified as a cancellation by
-   * {@link Pipeline.executeStepRun}. `ctx.signal` is restored to the pipeline
-   * signal afterwards, and `timedOut` reflects whether the timeout fired.
+   * `run` can self-abort on either the timeout or a cancel, and restored to
+   * the base signal afterwards. In a parallel group `ctx.signal` is shared by
+   * concurrent steps and stays the group-combined signal (see
+   * {@link RunMode}), so the timeout is enforced by the race alone.
+   * `timedOut` reflects whether the timeout fired.
    */
   private async runAttempt(
     step: Step<TContext>,
     ctx: TContext,
     baseSignal: AbortSignal,
+    mode: RunMode,
   ): Promise<AttemptResult> {
     if (step.timeout === undefined) {
       try {
@@ -484,10 +903,9 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       }
     }
     const timeoutSignal = AbortSignal.timeout(step.timeout);
-    // `ctx.signal` carries both the timeout and the pipeline cancellation so
-    // cooperative code can observe either; but only the timeout is raced against
-    // `run`, so a cancel never abandons a non-cooperative run (section 1.3).
-    setContextSignal(ctx, AbortSignal.any([timeoutSignal, baseSignal]));
+    if (mode === 'sequential') {
+      setContextSignal(ctx, AbortSignal.any([timeoutSignal, baseSignal]));
+    }
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutSignal.addEventListener(
@@ -503,7 +921,9 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       // which racer rejected first.
       return { ok: false, error, timedOut: timeoutSignal.aborted };
     } finally {
-      setContextSignal(ctx, baseSignal);
+      if (mode === 'sequential') {
+        setContextSignal(ctx, baseSignal);
+      }
     }
   }
 
@@ -547,41 +967,66 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     return { error, step };
   }
 
-  /**
-   * Records the steps cancelled by a pipeline cancellation (section 1.3):
-   * `this.steps[fromIndex..]` — the step whose turn it was when the abort was
-   * seen, plus every step after it — are pushed as `'skipped'` with
-   * `skipReason: 'cancelled'`. These steps never completed, so there is nothing
-   * to compensate for them; completed steps roll back separately.
-   */
-  private markCancelled(
-    fromIndex: number,
+  /** Pushes the `'skipped'` report for a step whose guard returned false. */
+  private pushGuardSkip(
+    step: Step<TContext>,
     steps: StepReport[],
     logger: Logger,
   ): void {
-    for (let i = fromIndex; i < this.steps.length; i++) {
-      const step = this.steps[i]!;
-      steps.push({
-        name: step.name,
-        status: 'skipped',
-        durationMs: 0,
-        skipReason: 'cancelled',
-      });
-      logger.debug('step skipped', {
-        stepName: step.name,
-        status: 'skipped',
-      });
+    steps.push({
+      name: step.name,
+      status: 'skipped',
+      durationMs: 0,
+      skipReason: 'guard returned false',
+    });
+    logger.debug('step skipped', {
+      stepName: step.name,
+      status: 'skipped',
+    });
+  }
+
+  /**
+   * Records the steps cancelled by a pipeline cancellation (section 1.3):
+   * every step of `this.entries[fromEntry..]` — expanding parallel groups —
+   * is pushed as `'skipped'` with `skipReason: 'cancelled'`. These steps never
+   * completed, so there is nothing to compensate for them; completed steps
+   * roll back separately. An entry that observed the cancel itself reports its
+   * own steps first and is excluded by the caller passing the next index.
+   */
+  private markCancelled(
+    fromEntry: number,
+    steps: StepReport[],
+    logger: Logger,
+  ): void {
+    for (let i = fromEntry; i < this.entries.length; i++) {
+      const entry = this.entries[i]!;
+      const group = entry.kind === 'sequential' ? [entry.step] : entry.steps;
+      for (const step of group) {
+        steps.push({
+          name: step.name,
+          status: 'skipped',
+          durationMs: 0,
+          skipReason: 'cancelled',
+        });
+        logger.debug('step skipped', {
+          stepName: step.name,
+          status: 'skipped',
+        });
+      }
     }
   }
 
   /**
    * Best-effort, reverse-order compensation (section 1.7). Walks completed steps
-   * newest-first and runs each `undo` if present. A successful undo flips the
-   * report to `'rolled-back'`; a throwing undo flips it to `'rollback-failed'`,
-   * collects the error (logged at `error`), and — crucially — does **not** abort
-   * the remaining undos, since compensations are independent. Completed steps
-   * with no `undo` declare themselves to need none and stay `'completed'`.
-   * Returns the collected undo failures (possibly empty).
+   * newest-first — parallel steps were registered in declaration order when
+   * their group settled, so a group is undone in reverse declaration order
+   * before the entries that preceded it (0.3.0 spec, section 1.1.3, point 3) —
+   * and runs each `undo` if present. A successful undo flips the report to
+   * `'rolled-back'`; a throwing undo flips it to `'rollback-failed'`, collects
+   * the error (logged at `error`), and — crucially — does **not** abort the
+   * remaining undos, since compensations are independent. Completed steps with
+   * no `undo` declare themselves to need none and stay `'completed'`. Returns
+   * the collected undo failures (possibly empty).
    */
   private async rollback(
     completed: Completed<TContext>[],
@@ -668,8 +1113,10 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 /**
  * Reassigns the run-scoped `signal` on the context. To consumers `ctx.signal` is
  * `readonly` (section 1.5), but the pipeline swaps it to a per-attempt combined
- * timeout/cancellation signal during a timed run (section 1.2) and restores it
- * afterwards. The context is per-`execute`, so this stays re-entrancy-safe.
+ * timeout/cancellation signal during a sequential timed run (section 1.2), and
+ * to the group-combined signal for the duration of a parallel group (0.3.0
+ * spec, section 1.1.3), restoring it afterwards. The context is per-`execute`,
+ * so this stays re-entrancy-safe.
  */
 function setContextSignal(ctx: BaseContext, signal: AbortSignal): void {
   (ctx as { signal: AbortSignal }).signal = signal;

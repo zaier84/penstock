@@ -31,5 +31,7 @@ describe('generic context inference (section 3.3)', () => {
     const result = await new Pipeline<OrderCtx>('p').execute({ items: [] });
     expectTypeOf(result).toEqualTypeOf<Result<OrderCtx>>();
     expectTypeOf(result.context.total).toEqualTypeOf<number | undefined>();
+    // Non-optional on every Result (0.3.0 spec, section 1.3.3).
+    expectTypeOf(result.aborted).toEqualTypeOf<boolean>();
   });
 });

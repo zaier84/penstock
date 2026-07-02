@@ -103,7 +103,24 @@ export interface Result<TContext extends BaseContext> {
   error: Error | null;
   /** `undo()` failures gathered during compensation (possibly empty). */
   rollbackErrors: Error[];
+  /**
+   * `true` when the pipeline was stopped by its `AbortSignal` (section 1.3.3
+   * of the 0.3.0 spec) — detected between entries, during a retry delay, or
+   * mid-parallel-group. `false` for step/guard failures, successful runs, and
+   * dry-run plans.
+   */
+  aborted: boolean;
 }
+
+/**
+ * Internal execution-sequence entry (0.3.0 spec, section 1.1.6): a pipeline is
+ * an ordered mix of sequential steps and parallel groups, each group occupying
+ * one logical position. Internal — the public API is `addStep`/`addParallel`;
+ * this type is not exported from the package.
+ */
+export type PipelineEntry<TContext extends BaseContext> =
+  | { kind: 'sequential'; step: Step<TContext> }
+  | { kind: 'parallel'; steps: Step<TContext>[] };
 
 /** A bundle of an engine's callable methods, as registered on an `Engine`. */
 export type EngineMethods = Record<string, (...args: unknown[]) => unknown>;

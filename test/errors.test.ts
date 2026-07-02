@@ -67,6 +67,7 @@ describe('errors', () => {
       steps: [],
       error,
       rollbackErrors: [],
+      aborted: false,
     });
 
     it('carries the result and originating cause; no rollbackErrors by default', () => {

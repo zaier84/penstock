@@ -60,6 +60,8 @@ describe('Pipeline retry (section 1.1)', () => {
         .execute({});
 
       expect(result.ok).toBe(false);
+      // Retry exhaustion is a step failure, not a cancellation.
+      expect(result.aborted).toBe(false);
       expect(run).toHaveBeenCalledTimes(3);
       const r = report(result, 'always-fails');
       expect(r.status).toBe('failed');

@@ -78,6 +78,7 @@ describe('Pipeline', () => {
       expect(result.ok).toBe(true);
       expect(result.error).toBeNull();
       expect(result.rollbackErrors).toEqual([]);
+      expect(result.aborted).toBe(false);
       expect(result.context.input.orderId).toBe('o');
       expect(result.steps).toHaveLength(2);
       expect(result.steps.map((s) => s.status)).toEqual([
@@ -96,6 +97,7 @@ describe('Pipeline', () => {
         steps: [],
         error: null,
         rollbackErrors: [],
+        aborted: false,
       });
       expect(result.context.input.orderId).toBe('o');
     });

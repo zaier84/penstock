@@ -29,6 +29,7 @@ describe('Pipeline cancellation (section 1.3)', () => {
       .execute({}, { signal: controller.signal });
 
     expect(result.ok).toBe(false);
+    expect(result.aborted).toBe(true);
     // The abort reason is surfaced unwrapped, not as a StepError (section 1.3).
     expect(result.error).toBe(reason);
     expect(runA).not.toHaveBeenCalled();
@@ -61,6 +62,7 @@ describe('Pipeline cancellation (section 1.3)', () => {
       .execute({}, { signal: controller.signal });
 
     expect(result.ok).toBe(false);
+    expect(result.aborted).toBe(true);
     expect(result.error).toBe(reason);
     // `a` completed, so it rolls back; `b` never ran.
     expect(undoA).toHaveBeenCalledTimes(1);
@@ -82,6 +84,7 @@ describe('Pipeline cancellation (section 1.3)', () => {
       .execute({}, { signal: controller.signal });
 
     expect(result.ok).toBe(true);
+    expect(result.aborted).toBe(false);
     expect(runA).toHaveBeenCalledTimes(1);
     expect(runB).toHaveBeenCalledTimes(1);
     expect(report(result, 'a').status).toBe('completed');
@@ -97,6 +100,7 @@ describe('Pipeline cancellation (section 1.3)', () => {
       .execute({}, { signal: controller.signal });
 
     expect(result.ok).toBe(false);
+    expect(result.aborted).toBe(true);
     // controller.abort() defaults reason to an AbortError DOMException.
     expect(result.error).toBe(controller.signal.reason);
     expect((result.error as Error).name).toBe('AbortError');
@@ -118,6 +122,7 @@ describe('Pipeline cancellation (section 1.3)', () => {
 
     expect(caught).toBeInstanceOf(PipelineError);
     expect((caught as PipelineError).cause).toBe(reason);
+    expect((caught as PipelineError).result.aborted).toBe(true);
   });
 
   it('wakes a retry delay immediately when cancelled, then rolls back', async () => {
@@ -146,6 +151,7 @@ describe('Pipeline cancellation (section 1.3)', () => {
       .execute({}, { signal: controller.signal });
 
     expect(result.ok).toBe(false);
+    expect(result.aborted).toBe(true);
     expect(result.error).toBe(reason);
     // Cancelled during the first delay: `b` ran once and was never retried.
     expect(runB).toHaveBeenCalledTimes(1);
@@ -186,6 +192,7 @@ describe('Pipeline cancellation (section 1.3)', () => {
       .execute({}, { signal: controller.signal });
 
     expect(result.ok).toBe(false);
+    expect(result.aborted).toBe(true);
     // Reason surfaces raw, not wrapped in a StepError (section 1.3).
     expect(result.error).toBe(reason);
     expect(report(result, 'b').status).toBe('skipped');
@@ -218,6 +225,7 @@ describe('Pipeline cancellation (section 1.3)', () => {
     // Ran to completion despite the cancel arriving mid-run.
     expect(bFinished).toBe(true);
     expect(result.ok).toBe(false);
+    expect(result.aborted).toBe(true);
     expect(result.error).toBe(reason);
     expect(report(result, 'b').status).toBe('rolled-back');
     expect(undoB).toHaveBeenCalledTimes(1);

@@ -47,6 +47,8 @@ describe('Pipeline timeout (section 1.2)', () => {
     const result = await promise;
 
     expect(result.ok).toBe(false);
+    // A timeout is a step failure, not a pipeline cancellation.
+    expect(result.aborted).toBe(false);
     const r = report(result, 'slow');
     expect(r.status).toBe('failed');
     expect(r.timedOut).toBe(true);
