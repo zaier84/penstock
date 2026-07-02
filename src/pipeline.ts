@@ -400,9 +400,11 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    * step (each attempt honouring the per-attempt timeout, section 1.2); on
    * success it returns the attempt count, and on failure it waits the computed
    * backoff delay before trying again, surfacing the final attempt's error (and
-   * whether it timed out) once the budget is spent. The inter-attempt delay is
-   * passed the pipeline signal so a pipeline cancellation can wake it early
-   * (section 1.3). A step with no `retry` runs exactly once (`attempts: 1`).
+   * whether it timed out) once the budget is spent. A pipeline cancellation that
+   * surfaces through an attempt or wakes the inter-attempt delay is reported as a
+   * cancellation rather than a failure (section 1.3) — the delay is passed the
+   * pipeline signal so a cancel wakes it early. A step with no `retry` runs
+   * exactly once (`attempts: 1`).
    */
   private async executeStepRun(
     step: Step<TContext>,
@@ -418,6 +420,15 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       const result = await this.runAttempt(step, ctx, baseSignal);
       if (result.ok) {
         return { ok: true, attempts: attempt };
+      }
+      // A pipeline cancellation seen through this attempt — a cooperative `run`
+      // that observed `ctx.signal` and rejected, or a cancel coinciding with a
+      // timeout — is a cancellation, not a step failure: stop and roll back
+      // (section 1.3) whatever retry budget remains, and never wrap the abort
+      // reason in a StepError. Cancellation takes precedence over a coincident
+      // timeout.
+      if (baseSignal.aborted) {
+        return { ok: false, cancelled: true };
       }
       // No retry policy, or the budget is spent: surface this final failure.
       // (Testing `retry === undefined` first also narrows it below.)
@@ -449,12 +460,15 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    * Runs a single attempt of a step's `run`, applying its per-attempt timeout
    * (section 1.2) when configured. With no timeout, `run` is awaited directly and
    * `ctx.signal` stays the pipeline signal — existing behaviour, unchanged. With
-   * a timeout, a fresh combined signal `AbortSignal.any([AbortSignal.timeout(t),
-   * baseSignal])` is exposed as `ctx.signal` (so `run` can observe it) and `run`
-   * is raced against it; if the timeout — or a pipeline cancel — fires first, the
-   * race rejects with the signal's `reason` (a `TimeoutError` DOMException when
-   * the timeout fired). `ctx.signal` is restored to the pipeline signal
-   * afterwards. `timedOut` reflects whether the per-attempt timeout fired.
+   * a timeout, `ctx.signal` is swapped to a fresh combined signal
+   * `AbortSignal.any([AbortSignal.timeout(t), baseSignal])` so a cooperative
+   * `run` can self-abort on either the timeout or a pipeline cancel (section 1.2).
+   * Only the **timeout** races `run`, though: a pipeline cancellation must never
+   * interrupt in-flight user code (section 1.3), so it cannot abandon the run —
+   * it is honoured by the between-step check (and, for a cooperative `run`, by
+   * the run rejecting itself), then classified as a cancellation by
+   * {@link Pipeline.executeStepRun}. `ctx.signal` is restored to the pipeline
+   * signal afterwards, and `timedOut` reflects whether the timeout fired.
    */
   private async runAttempt(
     step: Step<TContext>,
@@ -470,13 +484,17 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       }
     }
     const timeoutSignal = AbortSignal.timeout(step.timeout);
-    const combined = AbortSignal.any([timeoutSignal, baseSignal]);
-    setContextSignal(ctx, combined);
+    // `ctx.signal` carries both the timeout and the pipeline cancellation so
+    // cooperative code can observe either; but only the timeout is raced against
+    // `run`, so a cancel never abandons a non-cooperative run (section 1.3).
+    setContextSignal(ctx, AbortSignal.any([timeoutSignal, baseSignal]));
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
-        combined.addEventListener('abort', () => reject(combined.reason), {
-          once: true,
-        });
+        timeoutSignal.addEventListener(
+          'abort',
+          () => reject(timeoutSignal.reason),
+          { once: true },
+        );
       });
       await Promise.race([Promise.resolve(step.run(ctx)), timeoutPromise]);
       return { ok: true };
