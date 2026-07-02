@@ -89,6 +89,15 @@ export interface StepReport {
   attempts?: number;
   /** `true` when the step failed specifically due to a timeout (section 1.4). */
   timedOut?: boolean;
+  /**
+   * The nested pipeline's full `Result`, present only for pipeline-as-step
+   * entries whose inner pipeline ran (0.3.0 spec, section 1.2.5) — the outer
+   * `steps[]` stays flat, so the nested execution is inspectable here without
+   * needing `mapResult`.
+   */
+  // The inner context type is intentionally erased (0.3.0 spec, section 3.2).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  innerResult?: Result<any>;
 }
 
 /** The structured outcome of `pipeline.execute()` (section 3.4). */
@@ -121,6 +130,37 @@ export interface Result<TContext extends BaseContext> {
 export type PipelineEntry<TContext extends BaseContext> =
   | { kind: 'sequential'; step: Step<TContext> }
   | { kind: 'parallel'; steps: Step<TContext>[] };
+
+/**
+ * Options for `Pipeline.asStep(name, options)` (0.3.0 spec, section 1.2.2),
+ * which wraps a whole pipeline as a single `Step` of an outer pipeline. The
+ * inner pipeline runs on its **own fresh context**, isolated from the outer
+ * one — `mapInput` is the only way in, `mapResult` (and `innerResult` on the
+ * wrapping step's report) the way out.
+ */
+export interface AsStepOptions<
+  TOuterContext extends BaseContext,
+  TInnerInput = unknown,
+> {
+  /** Derives the inner pipeline's `input` from the outer context. Required. */
+  mapInput: (outerCtx: TOuterContext) => TInnerInput;
+  /**
+   * Called only when the inner pipeline succeeds (`ok: true`); use it to
+   * write inner outputs onto the outer context. Not called on inner failure.
+   */
+  // The inner context type is intentionally erased (0.3.0 spec, section 3.1).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  mapResult?: (innerResult: Result<any>, outerCtx: TOuterContext) => void;
+  /**
+   * Compensation for the wrapping step, run during **outer** rollback when a
+   * later outer step fails. The inner pipeline is *not* re-rolled-back — its
+   * work is committed; reversing its net effect is this function's job
+   * (0.3.0 spec, section 1.2.4, scenario B).
+   */
+  undo?: UndoFn<TOuterContext>;
+  /** Guard on the wrapping step, evaluated in the outer pipeline's context. */
+  when?: GuardFn<TOuterContext>;
+}
 
 /** A bundle of an engine's callable methods, as registered on an `Engine`. */
 export type EngineMethods = Record<string, (...args: unknown[]) => unknown>;

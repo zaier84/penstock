@@ -12,6 +12,7 @@ export { PenstockError, PipelineError, StepError, UsageError } from './errors';
 export type { BaseContext } from './context';
 export type {
   AfterHook,
+  AsStepOptions,
   BeforeHook,
   EngineAccessor,
   EngineMethods,

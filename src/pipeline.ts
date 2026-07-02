@@ -11,11 +11,13 @@ import { noopLogger } from './logger';
 import { Step } from './step';
 import type {
   AfterHook,
+  AsStepOptions,
   BeforeHook,
   ErrorHook,
   PipelineEntry,
   Result,
   RetryOptions,
+  StepOptions,
   StepReport,
 } from './types';
 
@@ -208,6 +210,67 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     }
     this.entries.push({ kind: 'parallel', steps: [...steps] });
     return this;
+  }
+
+  /**
+   * Wraps this whole pipeline as a single `Step` of an outer pipeline (0.3.0
+   * spec, section 1.2). The returned step is a **regular `Step`** — usable
+   * with `.when()`, `addStep`, or inside `addParallel` — whose `run`:
+   *
+   * 1. derives the inner input via `mapInput(outerCtx)`;
+   * 2. executes this pipeline on its **own fresh, isolated context**, with
+   *    the outer run's logger and the outer `ctx.signal` (so an outer cancel
+   *    — or, inside a parallel group, a peer failure — propagates into the
+   *    inner run), resolving engines from this pipeline's own `useEngine`
+   *    registrations plus the global registry — never the outer pipeline's
+   *    scoped engines;
+   * 3. on inner success calls `mapResult(innerResult, outerCtx)`;
+   * 4. on inner failure throws the inner `result.error` — the inner pipeline
+   *    has already rolled its own completed steps back inside `execute`, so
+   *    the outer pipeline wraps that error in its usual `StepError` and rolls
+   *    back only *outer* steps (section 1.2.4, scenario A). If the outer run
+   *    was cancelled, the wrapping step is classified `'cancelled'` like any
+   *    other step whose run ends under an aborted signal (section 1.3).
+   *
+   * Either way the inner `Result` is surfaced as `innerResult` on the
+   * wrapping step's report (section 1.2.5). During **outer** rollback the
+   * wrapping step is compensated only by `options.undo`, if given — the inner
+   * pipeline is never re-rolled-back (section 1.2.4, scenario B).
+   */
+  asStep<TOuterContext extends BaseContext>(
+    name: string,
+    options: AsStepOptions<TOuterContext, TContext['input']>,
+  ): Step<TOuterContext> {
+    if (typeof options?.mapInput !== 'function') {
+      throw new UsageError(
+        `Pipeline "${this.name}" asStep "${name}" requires a mapInput function`,
+      );
+    }
+    const run = async (outerCtx: TOuterContext): Promise<void> => {
+      const innerInput = options.mapInput(outerCtx);
+      const innerResult = await this.execute(innerInput, {
+        logger: outerCtx.logger,
+        signal: outerCtx.signal,
+      });
+      // Recorded before the failure throw so the executor can attach it to
+      // the wrapping step's report whatever the outcome.
+      storeInnerResult(outerCtx, name, innerResult);
+      if (!innerResult.ok) {
+        throw innerResult.error;
+      }
+      if (options.mapResult) {
+        options.mapResult(innerResult, outerCtx);
+      }
+    };
+    const stepOptions: StepOptions<TOuterContext> = { run };
+    if (options.when !== undefined) {
+      stepOptions.when = options.when;
+    }
+    if (options.undo !== undefined) {
+      stepOptions.undo = options.undo;
+    }
+    // The Step constructor validates the name (non-empty, non-reserved).
+    return new Step<TOuterContext>(name, stepOptions);
   }
 
   /** Registers a `before` observer hook; multiple are allowed (section 3.2). */
@@ -404,6 +467,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           status: 'failed',
           failures: [
             this.recordFailure(
+              ctx,
               step,
               raw,
               performance.now() - guardStart,
@@ -439,13 +503,17 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     if (!outcome.ok) {
       if (outcome.cancelled) {
         // The step never completed, so it is recorded 'cancelled' alongside
-        // the entries `execute` marks after it (section 1.3).
-        steps.push({
+        // the entries `execute` marks after it (section 1.3). A cancelled
+        // pipeline-as-step still surfaces its inner Result, showing the inner
+        // pipeline's own cancellation handling (0.3.0 spec, section 1.2.4 C).
+        const report: StepReport = {
           name: step.name,
           status: 'skipped',
           durationMs: 0,
           skipReason: 'cancelled',
-        });
+        };
+        attachInnerResult(ctx, report);
+        steps.push(report);
         logger.debug('step skipped', {
           stepName: step.name,
           status: 'skipped',
@@ -456,6 +524,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         status: 'failed',
         failures: [
           this.recordFailure(
+            ctx,
             step,
             outcome.error,
             durationMs,
@@ -475,6 +544,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       durationMs,
       attempts: outcome.attempts,
     };
+    attachInnerResult(ctx, report);
     steps.push(report);
     completed.push({ step, report });
     logger.debug('step completed', {
@@ -550,6 +620,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
             status: 'failed',
             failures: [
               this.recordFailure(
+                ctx,
                 step,
                 raw,
                 performance.now() - guardStart,
@@ -630,6 +701,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           durationMs: slot.durationMs,
           attempts: slot.attempts,
         };
+        attachInnerResult(ctx, report);
         steps.push(report);
         completed.push({ step, report });
       } else if (slot.kind === 'failed') {
@@ -643,18 +715,22 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         if (slot.timedOut) {
           report.timedOut = true;
         }
+        attachInnerResult(ctx, report);
         steps.push(report);
         failures.push({ error: slot.error, step });
       } else {
         // Ended by an abort mid-flight; the skipReason records which level.
-        steps.push({
+        // A cancelled pipeline-as-step still surfaces its inner Result.
+        const report: StepReport = {
           name: step.name,
           status: 'skipped',
           durationMs: 0,
           skipReason: pipelineSignal.aborted
             ? 'cancelled'
             : 'cancelled (parallel peer failed)',
-        });
+        };
+        attachInnerResult(ctx, report);
+        steps.push(report);
         logger.debug('step skipped', {
           stepName: step.name,
           status: 'skipped',
@@ -759,6 +835,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
             shouldRun = await step.guard(ctx);
           } catch (raw) {
             failure = this.recordFailure(
+              ctx,
               step,
               raw,
               performance.now() - guardStart,
@@ -934,9 +1011,12 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    * failure so `execute` can fire `onError` and roll back. `attempts` is recorded
    * when the failure came from a step's `run` (a guard failure leaves it unset,
    * since `run` was never reached); `timedOut` marks a run aborted by its
-   * per-attempt timeout (section 1.2).
+   * per-attempt timeout (section 1.2). A pipeline-as-step failure additionally
+   * carries the inner pipeline's `Result` as `innerResult` (0.3.0 spec,
+   * section 1.2.5).
    */
   private recordFailure(
+    ctx: TContext,
     step: Step<TContext>,
     raw: unknown,
     durationMs: number,
@@ -958,6 +1038,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     if (timedOut) {
       report.timedOut = true;
     }
+    attachInnerResult(ctx, report);
     steps.push(report);
     logger.debug('step failed', {
       stepName: step.name,
@@ -1120,6 +1201,51 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
  */
 function setContextSignal(ctx: BaseContext, signal: AbortSignal): void {
   (ctx as { signal: AbortSignal }).signal = signal;
+}
+
+/**
+ * Per-run registry of the inner `Result`s produced by pipeline-as-step runs
+ * (0.3.0 spec, section 1.2.5), keyed by the outer run's context and then by
+ * wrapping-step name. Keying by the per-`execute` context keeps it
+ * re-entrancy-safe (concurrent runs of one pipeline never share a map) and
+ * name-keying inside keeps concurrent parallel wrapping steps apart; the
+ * `WeakMap` ties each entry's lifetime to its run. The executor consumes an
+ * entry into `StepReport.innerResult` when it builds the wrapping step's
+ * terminal report; a retried wrapping step overwrites its entry per attempt,
+ * so the final attempt's inner Result is the one that surfaces. `Step` itself
+ * is never mutated.
+ */
+// Matches the intentionally erased inner context type of StepReport.innerResult.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const innerResults = new WeakMap<BaseContext, Map<string, Result<any>>>();
+
+/** Records the inner Result a pipeline-as-step run just produced. */
+function storeInnerResult(
+  ctx: BaseContext,
+  stepName: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see above.
+  result: Result<any>,
+): void {
+  let map = innerResults.get(ctx);
+  if (map === undefined) {
+    map = new Map();
+    innerResults.set(ctx, map);
+  }
+  map.set(stepName, result);
+}
+
+/**
+ * Moves a stored inner Result, if any, onto the step's terminal report as
+ * `innerResult`. A no-op for every step that is not a pipeline-as-step (or
+ * whose inner pipeline never ran — e.g. a guard skip or a throwing mapInput).
+ */
+function attachInnerResult(ctx: BaseContext, report: StepReport): void {
+  const map = innerResults.get(ctx);
+  const inner = map?.get(report.name);
+  if (inner !== undefined) {
+    map?.delete(report.name);
+    report.innerResult = inner;
+  }
 }
 
 /**

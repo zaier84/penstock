@@ -34,4 +34,29 @@ describe('generic context inference (section 3.3)', () => {
     // Non-optional on every Result (0.3.0 spec, section 1.3.3).
     expectTypeOf(result.aborted).toEqualTypeOf<boolean>();
   });
+
+  it('types asStep by the outer context and the inner input (0.3.0 section 1.2)', () => {
+    interface InvInput {
+      skus: string[];
+    }
+    type InvCtx = BaseContext<InvInput>;
+    const inner = new Pipeline<InvCtx>('inventory');
+
+    const wrapped = inner.asStep<OrderCtx>('run-inventory', {
+      // mapInput sees the OUTER context and must return the INNER input.
+      mapInput: (outer) => ({ skus: outer.input.items.map(() => 'sku') }),
+      mapResult: (_innerResult, outer) => {
+        expectTypeOf(outer).toEqualTypeOf<OrderCtx>();
+      },
+      undo: (outer) => {
+        expectTypeOf(outer).toEqualTypeOf<OrderCtx>();
+      },
+    });
+    expectTypeOf(wrapped).toEqualTypeOf<Step<OrderCtx>>();
+
+    inner.asStep<OrderCtx>('bad-wrap', {
+      // @ts-expect-error — mapInput must return the inner pipeline's input.
+      mapInput: () => ({ wrong: true }),
+    });
+  });
 });
