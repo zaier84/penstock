@@ -65,3 +65,16 @@ While in `0.x`, minor versions may include breaking changes.
 - `RetryOptions` exported as a public type.
 
 [0.2.0]: https://github.com/zaier84/penstock/releases/tag/v0.2.0
+
+## [0.2.1] - 2026-07-02
+
+### Fixed
+
+- Cancelling a pipeline while a step with a `timeout` was running is now
+  reported as a cancellation instead of a step failure. Such a step's
+  `run` is no longer interrupted by the cancel — only its timeout can
+  abort it — and remaining steps are skipped as `'cancelled'`, completed
+  steps roll back, and the abort reason is surfaced verbatim on
+  `result.error`, matching steps without a timeout.
+
+[0.2.1]: https://github.com/zaier84/penstock/releases/tag/v0.2.1
