@@ -14,6 +14,7 @@ import type {
   AsStepOptions,
   BeforeHook,
   ErrorHook,
+  LifecycleCallback,
   PipelineEntry,
   Result,
   RetryOptions,
@@ -155,6 +156,12 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   private readonly beforeHooks: BeforeHook<TContext>[] = [];
   private readonly afterHooks: AfterHook<TContext>[] = [];
   private readonly errorHooks: ErrorHook<TContext>[] = [];
+  // Lifecycle callbacks (0.3.0 spec, section 1.3), array-backed like the
+  // hooks: multiple per type, fired in registration order.
+  private readonly completeCallbacks: LifecycleCallback<TContext>[] = [];
+  private readonly failureCallbacks: LifecycleCallback<TContext>[] = [];
+  private readonly cancelCallbacks: LifecycleCallback<TContext>[] = [];
+  private readonly settledCallbacks: LifecycleCallback<TContext>[] = [];
 
   constructor(name: string) {
     // Empty / non-string / reserved name → UsageError, synchronously (section 1.10).
@@ -292,6 +299,47 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   }
 
   /**
+   * Registers a lifecycle callback fired when a run **succeeds**
+   * (`result.ok === true`) — before the `onSettled` callbacks (0.3.0 spec,
+   * section 1.3). Multiple are allowed; they run in registration order.
+   */
+  onComplete(callback: LifecycleCallback<TContext>): this {
+    this.completeCallbacks.push(callback);
+    return this;
+  }
+
+  /**
+   * Registers a lifecycle callback fired when a run fails because a **step
+   * (or guard) failed** — not a cancellation (`result.aborted` separates the
+   * two). Fires after rollback is complete, before `onSettled` (0.3.0 spec,
+   * section 1.3).
+   */
+  onFailure(callback: LifecycleCallback<TContext>): this {
+    this.failureCallbacks.push(callback);
+    return this;
+  }
+
+  /**
+   * Registers a lifecycle callback fired when a run was **stopped by its
+   * `AbortSignal`** (`result.aborted === true`). Fires after rollback is
+   * complete, before `onSettled` (0.3.0 spec, section 1.3).
+   */
+  onCancel(callback: LifecycleCallback<TContext>): this {
+    this.cancelCallbacks.push(callback);
+    return this;
+  }
+
+  /**
+   * Registers a lifecycle callback fired **always**, last — after the
+   * outcome-specific `onComplete` / `onFailure` / `onCancel` callbacks: the
+   * `finally` of the family (0.3.0 spec, section 1.3).
+   */
+  onSettled(callback: LifecycleCallback<TContext>): this {
+    this.settledCallbacks.push(callback);
+    return this;
+  }
+
+  /**
    * Registers an engine scoped to this pipeline; during resolution it shadows a
    * global engine of the same name (section 3.5). The scoped store is a `Map`, never a
    * user-keyed plain object (section 1.10). Chainable.
@@ -399,6 +447,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         rollbackErrors,
         aborted: true,
       };
+      await this.fireLifecycle(result, logger);
       if (options.throwOnError) {
         throw this.toPipelineError(result);
       }
@@ -426,13 +475,14 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         rollbackErrors,
         aborted: false,
       };
+      await this.fireLifecycle(result, logger);
       if (options.throwOnError) {
         throw this.toPipelineError(result);
       }
       return result;
     }
 
-    return {
+    const result: Result<TContext> = {
       ok: true,
       context: ctx,
       steps,
@@ -440,6 +490,8 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       rollbackErrors: [],
       aborted: false,
     };
+    await this.fireLifecycle(result, logger);
+    return result;
   }
 
   /**
@@ -1161,6 +1213,75 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       cause: result.error,
       rollbackErrors,
     });
+  }
+
+  /**
+   * Fires the lifecycle callbacks for a finished run (0.3.0 spec, section
+   * 1.3): the one outcome family — `onComplete` for success, `onCancel` for a
+   * signal-aborted run, `onFailure` for a step failure (`result.aborted` is
+   * what separates those two) — then, always, `onSettled`, last. By the time
+   * this runs, rollback has already completed; under `throwOnError` the
+   * callbacks fire before the `PipelineError` is thrown, so observers always
+   * see the settled `Result`. Dry-run returns from `plan` earlier and fires
+   * nothing.
+   */
+  private async fireLifecycle(
+    result: Result<TContext>,
+    logger: Logger,
+  ): Promise<void> {
+    if (result.ok) {
+      await this.fireLifecycleCallbacks(
+        this.completeCallbacks,
+        result,
+        'onComplete',
+        logger,
+      );
+    } else if (result.aborted) {
+      await this.fireLifecycleCallbacks(
+        this.cancelCallbacks,
+        result,
+        'onCancel',
+        logger,
+      );
+    } else {
+      await this.fireLifecycleCallbacks(
+        this.failureCallbacks,
+        result,
+        'onFailure',
+        logger,
+      );
+    }
+    await this.fireLifecycleCallbacks(
+      this.settledCallbacks,
+      result,
+      'onSettled',
+      logger,
+    );
+  }
+
+  /**
+   * Runs one family of lifecycle callbacks in registration order, each
+   * awaited. Lifecycle callbacks are observers with the same containment as
+   * hooks (section 1.8): a throw or rejection is caught, logged at `warn` —
+   * carrying only the callback kind and the error's type/message (section
+   * 1.10) — and never alters the `Result` or stops the remaining callbacks.
+   */
+  private async fireLifecycleCallbacks(
+    callbacks: readonly LifecycleCallback<TContext>[],
+    result: Result<TContext>,
+    kind: string,
+    logger: Logger,
+  ): Promise<void> {
+    for (const callback of callbacks) {
+      try {
+        await callback(result);
+      } catch (err) {
+        logger.warn('lifecycle callback threw', {
+          callback: kind,
+          ...describeError(err),
+        });
+      }
+    }
   }
 
   /**

@@ -1,6 +1,6 @@
 import { describe, expectTypeOf, it } from 'vitest';
 
-import type { BaseContext, Result } from '../src/index';
+import type { BaseContext, LifecycleCallback, Result } from '../src/index';
 import { Pipeline, Step } from '../src/index';
 
 interface OrderInput {
@@ -58,5 +58,28 @@ describe('generic context inference (section 3.3)', () => {
       // @ts-expect-error — mapInput must return the inner pipeline's input.
       mapInput: () => ({ wrong: true }),
     });
+  });
+
+  it('types lifecycle callbacks by the pipeline context (0.3.0 section 1.3)', () => {
+    const chained: Pipeline<OrderCtx> = new Pipeline<OrderCtx>('p')
+      .onComplete((result) => {
+        expectTypeOf(result).toEqualTypeOf<Result<OrderCtx>>();
+      })
+      .onFailure((result) => {
+        expectTypeOf(result.aborted).toEqualTypeOf<boolean>();
+      })
+      .onCancel(async (result) => {
+        expectTypeOf(result.error).toEqualTypeOf<Error | null>();
+      })
+      .onSettled((result) => {
+        expectTypeOf(result.context.total).toEqualTypeOf<number | undefined>();
+      });
+    expectTypeOf(chained).toEqualTypeOf<Pipeline<OrderCtx>>();
+
+    // The exported callback type matches what the registration methods take.
+    const cb: LifecycleCallback<OrderCtx> = (result) => {
+      expectTypeOf(result).toEqualTypeOf<Result<OrderCtx>>();
+    };
+    new Pipeline<OrderCtx>('p2').onSettled(cb);
   });
 });

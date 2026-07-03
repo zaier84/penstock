@@ -78,3 +78,20 @@ While in `0.x`, minor versions may include breaking changes.
   `result.error`, matching steps without a timeout.
 
 [0.2.1]: https://github.com/zaier84/penstock/releases/tag/v0.2.1
+
+## [0.3.0] - 2026-07-03
+
+### Added
+
+- Parallel step groups (`addParallel`) with concurrent execution and
+  saga-pattern rollback when any parallel step fails.
+- Pipeline-as-step composition (`Pipeline.asStep()`) for nested, hierarchical
+  workflow architectures with isolated contexts and rollback propagation.
+- Pipeline lifecycle events (`onComplete`, `onFailure`, `onCancel`,
+  `onSettled`) for clean observability.
+- `Result.aborted` field to programmatically distinguish cancellation from
+  step failure.
+- `StepReport.innerResult` for inspecting nested pipeline execution.
+- `AsStepOptions` and `LifecycleCallback` exported types.
+
+[0.3.0]: https://github.com/zaier84/penstock/releases/tag/v0.3.0

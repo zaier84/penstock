@@ -18,6 +18,7 @@ export type {
   EngineMethods,
   ErrorHook,
   GuardFn,
+  LifecycleCallback,
   Result,
   RetryOptions,
   RunFn,

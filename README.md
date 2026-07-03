@@ -321,6 +321,112 @@ new Step<OrderCtx>('reindex', async (ctx) => {
 A full, runnable example combining all three lives in
 [`examples/reliability.ts`](./examples/reliability.ts) — run it with `npm run example:reliability`.
 
+## Parallel step groups
+
+`addParallel([...])` runs independent steps **concurrently**. A group occupies a single logical
+position in the pipeline: everything before it has finished, all of its steps start together, and
+the next entry runs only once every one of them has settled. Guards are still evaluated
+sequentially, in declaration order, before anything launches — and `result.steps[]` always lists
+the group in declaration order, regardless of completion order, so the `Result` stays
+deterministic.
+
+```ts
+const pipeline = new Pipeline<OrderCtx>('process-order')
+  .addStep(validateOrder)
+  .addParallel([fetchInventory, checkFraud, fetchPricing]) // concurrent
+  .addStep(chargePayment);
+```
+
+When any parallel step fails (after its retries), the group **cancels its peers**: in-flight steps
+that observe `ctx.signal` can stop early, every step is awaited to settlement
+(`Promise.allSettled`, never fail-fast), and then the saga unwinds — the group's completed steps
+are rolled back in **reverse declaration order**, followed by the prior pipeline steps as usual. A
+peer stopped by the group abort reports `'skipped'` with
+`skipReason: 'cancelled (parallel peer failed)'`, and `result.error` is the **first** failure in
+declaration order (every failure keeps its own `StepReport.error`). Retry, timeout, guards, undo,
+and hooks all work inside a group exactly as they do sequentially.
+
+**Context keys are your responsibility.** All parallel steps share the same mutable `ctx`. Steps
+that write to **distinct** keys are safe; two parallel steps writing the **same** key race. Give
+each parallel step its own output field.
+
+## Pipeline composition
+
+`pipeline.asStep(name, options)` wraps a whole pipeline as a **single step** of an outer pipeline,
+so workflows compose hierarchically. The inner pipeline runs on its **own fresh, isolated
+context**: `mapInput` derives its input from the outer context (the only way in), and `mapResult`
+— called only on inner success — writes its outputs back (the way out). The outer run's logger and
+cancellation signal are forwarded; engines are **not** — the inner pipeline resolves its own
+`useEngine` registrations plus the global registry, never the outer pipeline's scoped engines.
+
+```ts
+const inventoryCheck = new Pipeline<InvCtx>('check-inventory')
+  .addStep(lookupWarehouse)
+  .addStep(reserveStock);
+
+const orderPipeline = new Pipeline<OrderCtx>('process-order')
+  .addStep(validateOrder)
+  .addStep(
+    inventoryCheck.asStep('run-inventory', {
+      mapInput: (ctx) => ({ items: ctx.input.items }),
+      mapResult: (innerResult, ctx) => {
+        ctx.reservationId = innerResult.context.reservationId;
+      },
+      undo: async (ctx) => {
+        await releaseStock(ctx.reservationId!);
+      },
+    }),
+  )
+  .addStep(chargePayment);
+```
+
+The two rollback chains stay clearly delineated:
+
+- **The inner pipeline fails** → it rolls back its own completed steps internally, and the wrapping
+  step reports `'failed'` (its `error` chains to the inner failure). The outer pipeline then rolls
+  back its own prior steps — inner undos are never re-run.
+- **The inner pipeline succeeds, a later outer step fails** → the inner work is committed. The
+  outer rollback runs the `undo` you gave `asStep` — reversing the inner pipeline's net effect is
+  that function's job, because only you know what "undo an entire pipeline" means. Without an
+  `undo`, the wrapping step stays `'completed'`.
+- **The outer run is cancelled mid-inner-execution** → the signal propagates in; the inner pipeline
+  stops between its steps and rolls back; the wrapping step reports `'skipped'` / `'cancelled'`.
+
+Either way, the wrapping step's report carries the full inner `Result` as
+`StepReport.innerResult`, so the nested execution stays inspectable without `mapResult`. The
+returned value is a regular `Step` — guard it with `when`, clone it with `.when()`, or place it
+inside `addParallel([...])` to run whole pipelines concurrently.
+
+## Lifecycle events
+
+Four pipeline-scoped callbacks observe a run once it has fully settled — after execution **and any
+rollback**. All are chainable, all can be registered multiple times (they run in registration
+order), and all receive the final `Result`:
+
+```ts
+const pipeline = new Pipeline<OrderCtx>('process-order')
+  .addStep(validate)
+  .addStep(charge)
+  .onComplete((result) => metrics.emit('order.success', result))
+  .onFailure((result) => metrics.emit('order.failure', result))
+  .onCancel((result) => metrics.emit('order.cancel', result))
+  .onSettled((result) => audit.log('order.settled', result));
+```
+
+- `onComplete` — the run succeeded (`result.ok === true`).
+- `onFailure` — a step (or guard) failed; fires after rollback is complete.
+- `onCancel` — the run was stopped by its `AbortSignal` (`result.aborted === true`); fires after
+  rollback is complete.
+- `onSettled` — **always** fires, last: the `finally` of the family.
+
+`result.aborted` is what separates `onCancel` from `onFailure`. Lifecycle callbacks are
+**observers** with the same containment as hooks: async callbacks are awaited, and a throwing
+callback is caught and logged at `warn` — it never changes the `Result`, never re-triggers
+rollback, and never stops the other callbacks. Dry-run plans fire no lifecycle events.
+
+A full, runnable example combining parallel groups, composition, and lifecycle events lives in
+[`examples/composition.ts`](./examples/composition.ts) — run it with `npm run example:composition`.
+
 ## Dry-run
 
 `execute(input, { dryRun: true })` **plans without executing**: it builds the context, evaluates each
@@ -385,10 +491,23 @@ in a downstream step once you know an earlier step has set the field.
 ### `Pipeline<TContext>`
 
 - `new Pipeline(name)` — non-empty, non-reserved name or `UsageError`.
-- `.addStep(step)` — appends; throws `UsageError` for a non-`Step` or a duplicate step name.
+- `.addStep(step)` — appends a sequential step; throws `UsageError` for a non-`Step` or a duplicate
+  step name.
+- `.addParallel(steps)` — inserts a parallel group (the steps run concurrently, occupying one
+  logical position). Requires **at least 2** `Step`s with pipeline-unique names, or `UsageError`.
+- `.asStep(name, options)` — wraps this whole pipeline as a single `Step` for use in an outer
+  pipeline. `options: AsStepOptions = { mapInput; mapResult?; undo?; when? }` — `mapInput`
+  (required) derives the inner input from the outer context; `mapResult` runs only on inner
+  success; `undo` compensates the wrapping step during **outer** rollback (the inner pipeline is
+  never re-rolled-back); `when` guards the wrapping step.
 - `.before(hook)` / `.after(hook)` / `.onError(hook)` — register observer hooks (multiple allowed, run
   in registration order). Signatures: `before(ctx, step)`, `after(ctx, step, { status, durationMs })`,
   `onError(error, ctx, step)`. Hook throws are contained and never change the outcome.
+- `.onComplete(cb)` / `.onFailure(cb)` / `.onCancel(cb)` / `.onSettled(cb)` — register lifecycle
+  callbacks (each a `LifecycleCallback`: `(result: Result<TContext>) => void | Promise<void>`),
+  fired once the run has settled, after any rollback: `onComplete` on success, `onFailure` on a
+  step failure, `onCancel` on cancellation (`result.aborted` decides which), then `onSettled`
+  always, last. Awaited, contained, none fire in dry-run.
 - `.useEngine(engine)` — registers a pipeline-scoped engine (shadows a global of the same name).
 - `.execute(input, options?)` — runs the flow, returns `Promise<Result<TContext>>`.
   `options: { throwOnError?: boolean; dryRun?: boolean; logger?: Logger; signal?: AbortSignal }`.
@@ -431,9 +550,10 @@ it's exposed at `ctx.logger`.
 interface Result<TContext> {
   ok: boolean; // false iff a step's run (or a guard) threw and the pipeline aborted
   context: TContext; // final context (post-execution / post-rollback)
-  steps: StepReport[]; // one entry per step, in pipeline order
+  steps: StepReport[]; // one entry per step, in pipeline (declaration) order
   error: Error | null; // the step failure that aborted the pipeline, if any
   rollbackErrors: Error[]; // undo() failures gathered during compensation
+  aborted: boolean; // true when the run was stopped by its AbortSignal
 }
 
 interface StepReport {
@@ -441,9 +561,11 @@ interface StepReport {
   status: StepStatus;
   durationMs: number; // 0 for skipped / would-run
   error?: Error; // present for 'failed' and 'rollback-failed'
-  skipReason?: string; // present for 'skipped' (e.g. 'cancelled')
+  skipReason?: string; // present for 'skipped' — 'guard returned false',
+  //   'cancelled', or 'cancelled (parallel peer failed)'
   attempts?: number; // times run was called; set for steps that ran (>= 1)
   timedOut?: boolean; // true when the step failed due to a timeout
+  innerResult?: Result<any>; // the nested Result; pipeline-as-step entries only
 }
 
 type StepStatus =
@@ -489,7 +611,8 @@ Post-MVP ideas, explicitly out of scope today:
 - [x] Per-step retries with backoff
 - [x] Per-step timeouts
 - [x] `AbortSignal` cancellation between steps
-- [ ] Parallel step groups (`addParallel([...])`)
+- [x] Parallel step groups (`addParallel([...])`)
+- [x] Pipeline-as-step composition (`pipeline.asStep(...)`)
 - [ ] Cross-pipeline context flow in `UseCase`
 - [ ] Richer dry-run that executes `sideEffectFree`-flagged steps
 - [ ] DAG execution (inter-step dependencies)

@@ -162,6 +162,19 @@ export interface AsStepOptions<
   when?: GuardFn<TOuterContext>;
 }
 
+/**
+ * A pipeline-scoped lifecycle callback (0.3.0 spec, section 1.3), registered
+ * via `onComplete` / `onFailure` / `onCancel` / `onSettled` and fired once a
+ * run has fully settled — after execution and any rollback — with the final
+ * `Result`. `Result.aborted` decides `onCancel` vs `onFailure`; `onSettled`
+ * always fires last. Lifecycle callbacks are observers (section 1.8): async
+ * ones are awaited, and a throw/rejection is contained and logged at `warn`,
+ * never altering the `Result` or stopping the remaining callbacks.
+ */
+export type LifecycleCallback<TContext extends BaseContext> = (
+  result: Result<TContext>,
+) => void | Promise<void>;
+
 /** A bundle of an engine's callable methods, as registered on an `Engine`. */
 export type EngineMethods = Record<string, (...args: unknown[]) => unknown>;
 
