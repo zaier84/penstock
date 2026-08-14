@@ -4,6 +4,7 @@ import type {
   BaseContext,
   GuardFn,
   LifecycleCallback,
+  ParallelOptions,
   Result,
   RunFn,
   StepMeta,
@@ -80,6 +81,24 @@ describe('generic context inference (section 3.3)', () => {
       // @ts-expect-error — the key must be a string or a function returning one.
       idempotencyKey: 42,
     });
+  });
+
+  it('types the addParallel options (0.4.0 section 1.5)', () => {
+    const bounded = new Pipeline<OrderCtx>('p').addParallel(
+      [new Step<OrderCtx>('a', () => {}), new Step<OrderCtx>('b', () => {})],
+      { concurrency: 2 },
+    );
+    // Chainable, exactly like the no-options form.
+    expectTypeOf(bounded).toEqualTypeOf<Pipeline<OrderCtx>>();
+    expectTypeOf<ParallelOptions['concurrency']>().toEqualTypeOf<
+      number | undefined
+    >();
+
+    new Pipeline<OrderCtx>('p2').addParallel(
+      [new Step<OrderCtx>('a', () => {}), new Step<OrderCtx>('b', () => {})],
+      // @ts-expect-error — the limit is a number of steps, not a string.
+      { concurrency: '2' },
+    );
   });
 
   it('types the execute Result by the pipeline context', async () => {

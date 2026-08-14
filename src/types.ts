@@ -194,6 +194,21 @@ export interface Result<TContext extends BaseContext> {
 }
 
 /**
+ * Options for a parallel group, passed as `addParallel(steps, options)` (0.4.0
+ * spec, section 1.5).
+ */
+export interface ParallelOptions {
+  /**
+   * Maximum number of the group's steps running at once — a positive integer,
+   * validated at build time. Omitted (the default), or set at or above the
+   * group size, runs every step at once, exactly as 0.3.0 does. Guards are
+   * still evaluated sequentially before any dispatch, and guard-skipped steps
+   * never occupy a slot.
+   */
+  concurrency?: number;
+}
+
+/**
  * Internal execution-sequence entry (0.3.0 spec, section 1.1.6): a pipeline is
  * an ordered mix of sequential steps and parallel groups, each group occupying
  * one logical position. Internal — the public API is `addStep`/`addParallel`;
@@ -201,7 +216,7 @@ export interface Result<TContext extends BaseContext> {
  */
 export type PipelineEntry<TContext extends BaseContext> =
   | { kind: 'sequential'; step: Step<TContext> }
-  | { kind: 'parallel'; steps: Step<TContext>[] };
+  | { kind: 'parallel'; steps: Step<TContext>[]; concurrency?: number };
 
 /**
  * Options for `Pipeline.asStep(name, options)` (0.3.0 spec, section 1.2.2),

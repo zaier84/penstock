@@ -15,6 +15,7 @@ import type {
   BeforeHook,
   ErrorHook,
   LifecycleCallback,
+  ParallelOptions,
   PipelineEntry,
   Result,
   RetryOptions,
@@ -103,10 +104,12 @@ type EntryOutcome<TContext extends BaseContext> =
   | { status: 'cancelled'; reason: Error };
 
 /**
- * Settled state of one launched parallel step, keyed by its position in the
+ * Settled state of one dispatched parallel step, keyed by its position in the
  * group. Filled as each task settles (completion order), then read back in
  * declaration order after `Promise.allSettled` so reports and rollback stay
- * deterministic (0.3.0 spec, sections 1.1.3 and 1.1.5).
+ * deterministic (0.3.0 spec, sections 1.1.3 and 1.1.5). A step still queued in
+ * a bounded pool when the group aborted was never dispatched and so has **no**
+ * slot; it is classified like the `'cancelled'` kind (0.4.0 spec, section 1.5).
  */
 type ParallelSlot =
   | {
@@ -205,11 +208,28 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    * least 2 steps, each a `Step` whose name is unique across the whole
    * pipeline. The group is validated in full before any of it is registered,
    * so a throwing call leaves the pipeline unchanged. Chainable.
+   *
+   * `options.concurrency` caps how many of the group's steps run at once
+   * (0.4.0 spec, section 1.5); it must be an integer `>= 1`. Omitting it — or
+   * setting it at or above the group size — runs everything at once, which is
+   * exactly the 0.3.0 behaviour.
    */
-  addParallel(steps: Step<TContext>[]): this {
+  addParallel(steps: Step<TContext>[], options?: ParallelOptions): this {
     if (!Array.isArray(steps) || steps.length < 2) {
       throw new UsageError(
         `Pipeline "${this.name}" addParallel requires at least 2 steps`,
+      );
+    }
+    // A bad limit is misuse, so it fails fast and synchronously like every
+    // other build-time check (section 1.5). `Number.isInteger` also rejects
+    // NaN, fractions, Infinity, and non-numbers.
+    const concurrency = options?.concurrency;
+    if (
+      concurrency !== undefined &&
+      (!Number.isInteger(concurrency) || concurrency < 1)
+    ) {
+      throw new UsageError(
+        `Pipeline "${this.name}" addParallel concurrency must be an integer greater than or equal to 1`,
       );
     }
     const incoming = new Set<string>();
@@ -227,7 +247,12 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     for (const name of incoming) {
       this.stepNames.add(name);
     }
-    this.entries.push({ kind: 'parallel', steps: [...steps] });
+    // Keep the limit truly absent when not supplied (mirrors Step's options).
+    this.entries.push(
+      concurrency === undefined
+        ? { kind: 'parallel', steps: [...steps] }
+        : { kind: 'parallel', steps: [...steps], concurrency },
+    );
     return this;
   }
 
@@ -431,6 +456,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       } else {
         outcome = await this.executeParallelEntry(
           entry.steps,
+          entry.concurrency,
           ctx,
           steps,
           completed,
@@ -694,20 +720,23 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    *    aborts the whole group before anything runs (steps already
    *    guard-skipped keep their reports; steps cleared to run never started
    *    and get none — same as steps after a sequential failure).
-   * 2. **Concurrent execution** of the cleared steps. Every step's runs are
-   *    driven by a signal combining two cancellation levels: a group-scoped
-   *    `AbortController` (aborted as soon as any peer fails) and the pipeline
-   *    signal (external cancellation). `before` hooks fire per step at launch
-   *    (declaration order — launching is sequential; only the runs overlap);
-   *    `after` hooks fire per step as it completes (completion order).
-   *    `Promise.allSettled` — never `Promise.all` — waits for every step to
-   *    settle before anything is classified or rolled back.
+   * 2. **Concurrent execution** of the cleared steps, through a bounded pool
+   *    of at most `concurrency` slots (0.4.0 spec, section 1.5; unbounded when
+   *    the option is omitted). Every step's runs are driven by a signal
+   *    combining two cancellation levels: a group-scoped `AbortController`
+   *    (aborted as soon as any peer fails) and the pipeline signal (external
+   *    cancellation). `before` hooks fire per step at dispatch (declaration
+   *    order — dispatching is sequential; only the runs overlap); `after`
+   *    hooks fire per step as it completes (completion order).
+   *    `Promise.allSettled` — never `Promise.all` — waits for every dispatched
+   *    step to settle before anything is classified or rolled back.
    * 3. **Classification, in declaration order,** so `result.steps[]` and the
    *    rollback registration are deterministic regardless of completion
    *    order: completed steps join the rollback list (their reverse walk thus
    *    undoes the group in reverse declaration order before prior entries),
    *    failed steps become failures (`result.error` is the first), and steps
-   *    ended by an abort are `'skipped'` — `'cancelled'` if the pipeline was
+   *    ended by an abort — in flight, or still queued and therefore never
+   *    dispatched — are `'skipped'`: `'cancelled'` if the pipeline was
    *    cancelled, `'cancelled (parallel peer failed)'` if the group was.
    *
    * A pipeline-level cancel observed during the group takes precedence over
@@ -717,6 +746,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    */
   private async executeParallelEntry(
     groupSteps: Step<TContext>[],
+    concurrency: number | undefined,
     ctx: TContext,
     steps: StepReport[],
     completed: Completed<TContext>[],
@@ -775,14 +805,39 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       // its own `meta.signal`, derived from this group signal per attempt
       // (0.4.0 spec, section 1.3). `ctx.signal` stays the pipeline signal.
       const tasks: Promise<void>[] = [];
+      // The bounded pool (section 1.5): dispatching stays sequential and in
+      // declaration order, but at most `limit` runs are in flight at once, a
+      // queued step being dispatched as soon as a slot frees. Omitting the
+      // option — or setting it at or above the group size — makes `inFlight`
+      // never reach the limit, so the loop below never waits and behaves
+      // exactly as 0.3.0 did.
+      const limit = concurrency ?? runnable.length;
+      const inFlight = new Set<Promise<void>>();
       // A step whose idempotency key fails to resolve (section 1.4) fails
       // before it ever runs. Aborting the group there and then would hand
-      // every peer launched afterwards an already-aborted signal — which
-      // fires no `abort` event, stranding a cooperative run that waits for
-      // one. So key failures are collected and the group is aborted once,
-      // below, when every other step is already in flight with a live signal.
+      // every peer dispatched afterwards in the same burst an already-aborted
+      // signal — which fires no `abort` event, stranding a cooperative run
+      // that waits for one. So key failures are collected and the group is
+      // aborted once every other step is in flight with a live signal: at the
+      // first point the pool would have to wait, or after the final dispatch.
       let keyFailure: StepError | undefined;
       for (const { step, index } of runnable) {
+        if (inFlight.size >= limit) {
+          if (keyFailure !== undefined) {
+            // Every peer is in flight, so aborting is safe now — and this
+            // step, still queued, is simply never dispatched.
+            group.abort(keyFailure);
+            break;
+          }
+          await Promise.race(inFlight);
+          // A queued step is never dispatched once the group has aborted —
+          // a peer failed, or the pipeline was cancelled (section 1.5). It
+          // settles into no slot at all and is classified below exactly like
+          // an in-flight peer that was cancelled.
+          if (groupSignal.aborted) {
+            break;
+          }
+        }
         await this.runHooks(
           this.beforeHooks,
           (hook) => hook(ctx, step),
@@ -812,24 +867,29 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           keyFailure ??= error;
           continue;
         }
-        tasks.push(
-          this.runParallelStep(
-            step,
-            index,
-            ctx,
-            groupSignal,
-            group,
-            slots,
-            logger,
-            idempotencyKey,
-          ),
+        const task = this.runParallelStep(
+          step,
+          index,
+          ctx,
+          groupSignal,
+          group,
+          slots,
+          logger,
+          idempotencyKey,
         );
+        tasks.push(task);
+        // Occupies a slot until it settles; the handler is registered here, so
+        // it has already run by the time a waiting `Promise.race` resolves.
+        inFlight.add(task);
+        void task.then(() => {
+          inFlight.delete(task);
+        });
       }
       if (keyFailure !== undefined) {
         group.abort(keyFailure);
       }
-      // Wait for every step to settle — completed, failed, or cancelled —
-      // before classification and rollback (section 1.1.3, point 1).
+      // Wait for every dispatched step to settle — completed, failed, or
+      // cancelled — before classification and rollback (section 1.1.3, point 1).
       await Promise.allSettled(tasks);
     }
 
@@ -841,9 +901,11 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         this.pushGuardSkip(step, steps, logger);
         continue;
       }
-      // Every launched step settled into a slot before allSettled resolved.
-      const slot = slots.get(i)!;
-      if (slot.kind === 'completed') {
+      // Every dispatched step settled into a slot before allSettled resolved.
+      // A step still queued when the group aborted has none at all, and is
+      // reported exactly like an in-flight peer that was cancelled (section 1.5).
+      const slot = slots.get(i);
+      if (slot?.kind === 'completed') {
         const report: StepReport = {
           name: step.name,
           status: 'completed',
@@ -858,7 +920,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           report,
           idempotencyKey: slot.idempotencyKey,
         });
-      } else if (slot.kind === 'failed') {
+      } else if (slot?.kind === 'failed') {
         const report: StepReport = {
           name: step.name,
           status: 'failed',
@@ -880,7 +942,8 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         steps.push(report);
         failures.push({ error: slot.error, step });
       } else {
-        // Ended by an abort mid-flight; the skipReason records which level.
+        // Ended by an abort — mid-flight, or before it was ever dispatched;
+        // the skipReason records which level aborted.
         // A cancelled pipeline-as-step still surfaces its inner Result.
         const report: StepReport = {
           name: step.name,
@@ -909,7 +972,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   }
 
   /**
-   * Drives one launched parallel step to a settled {@link ParallelSlot} and
+   * Drives one dispatched parallel step to a settled {@link ParallelSlot} and
    * fires its per-step observers. On the first failure in the group it aborts
    * the group controller so in-flight peers that forwarded `ctx.signal` can
    * stop early (section 1.1.3, point 1) — later failures re-abort harmlessly.

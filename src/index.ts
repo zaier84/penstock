@@ -19,6 +19,7 @@ export type {
   ErrorHook,
   GuardFn,
   LifecycleCallback,
+  ParallelOptions,
   Result,
   RetryOptions,
   RunFn,
