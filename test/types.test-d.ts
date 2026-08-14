@@ -7,10 +7,14 @@ import type {
   ParallelOptions,
   Result,
   RunFn,
+  SerializeOptions,
+  SerializedError,
+  SerializedResult,
+  SerializedStepReport,
   StepMeta,
   UndoFn,
 } from '../src/index';
-import { Pipeline, Step } from '../src/index';
+import { Pipeline, serializeResult, Step } from '../src/index';
 
 interface OrderInput {
   items: { price: number; qty: number }[];
@@ -114,6 +118,34 @@ describe('generic context inference (section 3.3)', () => {
     expectTypeOf(result.steps[0]?.idempotencyKey).toEqualTypeOf<
       string | undefined
     >();
+  });
+
+  it('types serializeResult and its output (0.4.0 section 1.6)', async () => {
+    const result = await new Pipeline<OrderCtx>('p').execute({ items: [] });
+    const serialized = serializeResult(result);
+
+    expectTypeOf(serialized).toEqualTypeOf<SerializedResult>();
+    expectTypeOf(serialized.error).toEqualTypeOf<SerializedError | null>();
+    expectTypeOf(serialized.rollbackErrors).toEqualTypeOf<SerializedError[]>();
+    expectTypeOf(serialized.steps).toEqualTypeOf<SerializedStepReport[]>();
+    // Opaque by design: the caller opted in and knows their own context.
+    expectTypeOf(serialized.context).toEqualTypeOf<unknown>();
+    expectTypeOf(serialized.steps[0]?.innerResult).toEqualTypeOf<
+      SerializedResult | undefined
+    >();
+    // Custom error fields are reachable, untyped, through the index signature.
+    expectTypeOf(serialized.error?.stepName).toEqualTypeOf<unknown>();
+    expectTypeOf<SerializeOptions['includeContext']>().toEqualTypeOf<
+      boolean | undefined
+    >();
+    expectTypeOf<SerializeOptions['maxCauseDepth']>().toEqualTypeOf<
+      number | undefined
+    >();
+
+    serializeResult(result, {
+      // @ts-expect-error — the options are the documented three, nothing else.
+      includeSecrets: true,
+    });
   });
 
   it('types asStep by the outer context and the inner input (0.3.0 section 1.2)', () => {

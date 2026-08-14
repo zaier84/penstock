@@ -3,6 +3,7 @@
 export { Step } from './step';
 export { Pipeline } from './pipeline';
 export type { ExecuteOptions } from './pipeline';
+export { serializeResult } from './serialize';
 export { Engine, registerEngine, clearEngines } from './engine';
 export { UseCase } from './usecase';
 export type { UseCaseResult } from './usecase';
@@ -23,6 +24,10 @@ export type {
   Result,
   RetryOptions,
   RunFn,
+  SerializeOptions,
+  SerializedError,
+  SerializedResult,
+  SerializedStepReport,
   StepMeta,
   StepOptions,
   StepReport,

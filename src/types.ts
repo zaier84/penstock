@@ -194,6 +194,76 @@ export interface Result<TContext extends BaseContext> {
 }
 
 /**
+ * Options for `serializeResult` (0.4.0 spec, section 1.6).
+ */
+export interface SerializeOptions {
+  /**
+   * Include `result.context` in the output. Default `false` — a security
+   * decision matching the log-hygiene invariant (section 1.10): a serialized
+   * `Result` is destined for a log aggregator, and contexts routinely hold
+   * PII, tokens, and payment details. Opting in means opting into that.
+   */
+  includeContext?: boolean;
+  /** Include error stacks. Default `true`. */
+  includeStacks?: boolean;
+  /** Maximum depth to follow error `cause` chains. Default `5`. */
+  maxCauseDepth?: number;
+}
+
+/**
+ * A JSON-safe rendering of a thrown value (0.4.0 spec, section 1.6). Anything
+ * that is not an `Error` — `throw 'boom'`, `throw 42`, `throw null` — becomes
+ * `{ name: 'UnknownError', message: String(value) }` rather than crashing the
+ * serializer.
+ */
+export interface SerializedError {
+  name: string;
+  message: string;
+  /** Omitted when `includeStacks` is `false`, or when the value has no stack. */
+  stack?: string;
+  /** Depth-limited by `maxCauseDepth`; simply absent once the limit is reached. */
+  cause?: SerializedError;
+  /**
+   * Custom own-enumerable properties, so `StepError.stepName` and users' own
+   * error fields survive. An `AggregateError` also carries `errors`
+   * (a `SerializedError[]`), and a `PipelineError` its `result` (a nested
+   * `SerializedResult`, honouring the same options).
+   */
+  [key: string]: unknown;
+}
+
+/** A JSON-safe rendering of a {@link StepReport} (0.4.0 spec, section 1.6). */
+export interface SerializedStepReport {
+  name: string;
+  status: StepStatus;
+  durationMs: number;
+  error?: SerializedError;
+  skipReason?: string;
+  attempts?: number;
+  timedOut?: boolean;
+  idempotencyKey?: string;
+  /** The nested pipeline's serialized `Result`, under the same options. */
+  innerResult?: SerializedResult;
+}
+
+/**
+ * A JSON-safe rendering of a {@link Result} (0.4.0 spec, section 1.6),
+ * produced by `serializeResult` and guaranteed to survive `JSON.stringify`.
+ */
+export interface SerializedResult {
+  ok: boolean;
+  aborted: boolean;
+  executionId: string;
+  pipelineName: string;
+  durationMs: number;
+  error: SerializedError | null;
+  rollbackErrors: SerializedError[];
+  steps: SerializedStepReport[];
+  /** Present only when `includeContext: true`. */
+  context?: unknown;
+}
+
+/**
  * Options for a parallel group, passed as `addParallel(steps, options)` (0.4.0
  * spec, section 1.5).
  */

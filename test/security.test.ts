@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
+import type { BaseContext } from '../src/context';
 import { Engine } from '../src/engine';
 import { StepError, UsageError } from '../src/errors';
 import { Pipeline } from '../src/pipeline';
+import { serializeResult } from '../src/serialize';
 import { Step } from '../src/step';
+import type { Result } from '../src/types';
 
 // The names that must be rejected everywhere a name is accepted (section 1.10).
 const RESERVED = ['__proto__', 'prototype', 'constructor'];
@@ -52,5 +55,56 @@ describe('security invariants (section 1.10)', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toBeInstanceOf(StepError);
     expect((result.error as StepError).cause).toBeInstanceOf(UsageError);
+  });
+
+  describe('serialization hygiene (0.4.0 section 1.6)', () => {
+    it('never puts the context — or its input — in the output unless asked', async () => {
+      const result = await new Pipeline('secrets')
+        .addStep(new Step('a', () => {}))
+        .execute({ apiKey: 'sk_live_do_not_log' });
+
+      const serialized = serializeResult(result);
+      expect('context' in serialized).toBe(false);
+      // Same invariant as the logger: payloads never leave the process by
+      // default, only names, statuses, durations, and error types/messages.
+      expect(JSON.stringify(serialized)).not.toContain('sk_live_do_not_log');
+    });
+
+    it('does not pollute Object.prototype through a __proto__ error property', () => {
+      const error = new Error('hostile');
+      // Assignment would reassign the prototype; defineProperty makes it a
+      // genuine own key, which is what a hostile payload would look like.
+      Object.defineProperty(error, '__proto__', {
+        value: { polluted: true },
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+      const result: Result<BaseContext> = {
+        ok: false,
+        context: {} as BaseContext,
+        steps: [],
+        error,
+        rollbackErrors: [],
+        aborted: false,
+        executionId: 'exec-1',
+        pipelineName: 'p',
+        durationMs: 1,
+      };
+
+      const serialized = serializeResult(result);
+
+      // The key survives as data on the output, not as a prototype swap.
+      expect(Object.getPrototypeOf(serialized.error)).toBe(Object.prototype);
+      expect(
+        Object.getOwnPropertyDescriptor(serialized.error, '__proto__')?.value,
+      ).toEqual({ polluted: true });
+      // Canary: nothing reached Object.prototype.
+      const probe = {} as Record<string, unknown>;
+      expect(probe.polluted).toBeUndefined();
+      expect(
+        (Object.prototype as Record<string, unknown>).polluted,
+      ).toBeUndefined();
+    });
   });
 });
