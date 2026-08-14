@@ -79,6 +79,10 @@ describe('Pipeline', () => {
       expect(result.error).toBeNull();
       expect(result.rollbackErrors).toEqual([]);
       expect(result.aborted).toBe(false);
+      // Self-describing identity fields (0.4.0 spec, sections 1.1 and 1.7).
+      expect(result.executionId).toBe(result.context.executionId);
+      expect(result.pipelineName).toBe('shape');
+      expect(result.durationMs).toBeGreaterThanOrEqual(0);
       expect(result.context.input.orderId).toBe('o');
       expect(result.steps).toHaveLength(2);
       expect(result.steps.map((s) => s.status)).toEqual([
@@ -98,6 +102,9 @@ describe('Pipeline', () => {
         error: null,
         rollbackErrors: [],
         aborted: false,
+        executionId: expect.any(String),
+        pipelineName: 'empty',
+        durationMs: expect.any(Number),
       });
       expect(result.context.input.orderId).toBe('o');
     });

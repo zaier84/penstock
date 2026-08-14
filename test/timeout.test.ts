@@ -114,15 +114,17 @@ describe('Pipeline timeout (section 1.2)', () => {
     expect(run).toHaveBeenCalledTimes(2);
   });
 
-  it('exposes the combined timeout+cancellation signal as ctx.signal', async () => {
+  it('exposes the combined timeout+cancellation signal as meta.signal', async () => {
     vi.useFakeTimers();
     const outer = new AbortController();
     let captured: AbortSignal | undefined;
+    let capturedCtxSignal: AbortSignal | undefined;
     const promise = new Pipeline<Ctx>('p')
       .addStep(
         new Step<Ctx>('s', {
-          run: (ctx) => {
-            captured = ctx.signal;
+          run: (ctx, meta) => {
+            captured = meta.signal;
+            capturedCtxSignal = ctx.signal;
             return neverResolves();
           },
           timeout: 20,
@@ -135,25 +137,37 @@ describe('Pipeline timeout (section 1.2)', () => {
 
     expect(result.ok).toBe(false);
     expect(captured).toBeInstanceOf(AbortSignal);
-    // It is the combined signal, not the raw pipeline signal.
+    // meta.signal is the combined signal, not the raw pipeline signal.
     expect(captured).not.toBe(outer.signal);
     expect(captured?.aborted).toBe(true);
     expect((captured?.reason as Error).name).toBe('TimeoutError');
+    // ctx.signal stays the pipeline signal and a step timeout never aborts it
+    // (0.4.0 spec, section 1.3).
+    expect(capturedCtxSignal).toBe(outer.signal);
+    expect(capturedCtxSignal?.aborted).toBe(false);
   });
 
-  it('leaves ctx.signal as the pipeline signal when no timeout is set', async () => {
+  it('leaves ctx.signal as the pipeline signal, with or without a timeout', async () => {
     const outer = new AbortController();
-    let captured: AbortSignal | undefined;
+    const captured: AbortSignal[] = [];
     const result = await new Pipeline<Ctx>('p')
       .addStep(
-        new Step<Ctx>('s', (ctx) => {
-          captured = ctx.signal;
+        new Step<Ctx>('plain', (ctx) => {
+          captured.push(ctx.signal);
+        }),
+      )
+      .addStep(
+        new Step<Ctx>('timed', {
+          run: (ctx) => {
+            captured.push(ctx.signal);
+          },
+          timeout: 10_000,
         }),
       )
       .execute({}, { signal: outer.signal });
 
     expect(result.ok).toBe(true);
-    // No combining: ctx.signal is exactly the pipeline signal (existing behaviour).
-    expect(captured).toBe(outer.signal);
+    // No combining, no swapping: ctx.signal is exactly the pipeline signal.
+    expect(captured).toEqual([outer.signal, outer.signal]);
   });
 });

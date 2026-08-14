@@ -1,6 +1,14 @@
 import { describe, expectTypeOf, it } from 'vitest';
 
-import type { BaseContext, LifecycleCallback, Result } from '../src/index';
+import type {
+  BaseContext,
+  GuardFn,
+  LifecycleCallback,
+  Result,
+  RunFn,
+  StepMeta,
+  UndoFn,
+} from '../src/index';
 import { Pipeline, Step } from '../src/index';
 
 interface OrderInput {
@@ -20,10 +28,57 @@ describe('generic context inference (section 3.3)', () => {
       expectTypeOf(ctx.input).toEqualTypeOf<OrderInput>();
       expectTypeOf(ctx.total).toEqualTypeOf<number | undefined>();
       expectTypeOf(ctx.reservationId).toEqualTypeOf<string | undefined>();
-      // Cancellation/timeout signal is always present and non-optional (section 1.5).
+      // Pipeline-level cancellation signal, always present (0.4.0 section 1.3).
       expectTypeOf(ctx.signal).toEqualTypeOf<AbortSignal>();
+      // Execution identity, always present (0.4.0 section 1.1).
+      expectTypeOf(ctx.executionId).toEqualTypeOf<string>();
       // @ts-expect-error — fields not declared on OrderCtx do not exist.
       void ctx.nonexistent;
+    });
+  });
+
+  it('types the StepMeta handed to run and undo (0.4.0 section 1.2)', () => {
+    new Step<OrderCtx>('charge', {
+      run: (ctx, meta) => {
+        expectTypeOf(ctx).toEqualTypeOf<OrderCtx>();
+        expectTypeOf(meta).toEqualTypeOf<StepMeta>();
+        expectTypeOf(meta.stepName).toEqualTypeOf<string>();
+        expectTypeOf(meta.attempt).toEqualTypeOf<number>();
+        expectTypeOf(meta.idempotencyKey).toEqualTypeOf<string>();
+        expectTypeOf(meta.signal).toEqualTypeOf<AbortSignal>();
+      },
+      undo: (_ctx, meta) => {
+        expectTypeOf(meta).toEqualTypeOf<StepMeta>();
+      },
+      when: (ctx) => ctx.input.items.length > 0,
+    });
+
+    // Guards stay single-argument pure predicates (0.4.0 section 1.2): handing
+    // them an attempt number or an idempotency key would invite side effects.
+    expectTypeOf<Parameters<GuardFn<OrderCtx>>['length']>().toEqualTypeOf<1>();
+    expectTypeOf<Parameters<RunFn<OrderCtx>>['length']>().toEqualTypeOf<2>();
+    expectTypeOf<Parameters<UndoFn<OrderCtx>>['length']>().toEqualTypeOf<2>();
+
+    // Declaring fewer parameters stays valid — no arity break for 0.3.x code.
+    const legacy: RunFn<OrderCtx> = (ctx) => {
+      expectTypeOf(ctx).toEqualTypeOf<OrderCtx>();
+    };
+    new Step<OrderCtx>('legacy', legacy);
+  });
+
+  it('types the idempotencyKey option by the step context (0.4.0 section 1.4)', () => {
+    new Step<OrderCtx>('charge', {
+      run: () => {},
+      idempotencyKey: (ctx) => `charge:${ctx.input.items.length}`,
+    });
+    new Step<OrderCtx>('charge-fixed', {
+      run: () => {},
+      idempotencyKey: 'literal',
+    });
+    new Step<OrderCtx>('charge-bad', {
+      run: () => {},
+      // @ts-expect-error — the key must be a string or a function returning one.
+      idempotencyKey: 42,
     });
   });
 
@@ -33,6 +88,13 @@ describe('generic context inference (section 3.3)', () => {
     expectTypeOf(result.context.total).toEqualTypeOf<number | undefined>();
     // Non-optional on every Result (0.3.0 spec, section 1.3.3).
     expectTypeOf(result.aborted).toEqualTypeOf<boolean>();
+    // Required identity and timing fields (0.4.0 spec, sections 1.1 and 1.7).
+    expectTypeOf(result.executionId).toEqualTypeOf<string>();
+    expectTypeOf(result.pipelineName).toEqualTypeOf<string>();
+    expectTypeOf(result.durationMs).toEqualTypeOf<number>();
+    expectTypeOf(result.steps[0]?.idempotencyKey).toEqualTypeOf<
+      string | undefined
+    >();
   });
 
   it('types asStep by the outer context and the inner input (0.3.0 section 1.2)', () => {

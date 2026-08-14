@@ -18,6 +18,7 @@ import type {
   PipelineEntry,
   Result,
   RetryOptions,
+  StepMeta,
   StepOptions,
   StepReport,
 } from './types';
@@ -32,10 +33,11 @@ export interface ExecuteOptions {
   dryRun?: boolean;
   logger?: Logger;
   /**
-   * Pipeline-level cancellation signal (section 1.3). It is threaded onto
-   * `ctx.signal` so steps can forward it into their own async work, and it is
-   * checked between entries — an aborted signal stops the pipeline, skips the
-   * remaining steps as `'cancelled'`, and rolls back completed ones.
+   * Pipeline-level cancellation signal (section 1.3). It is bound to
+   * `ctx.signal` for the whole run and folded into every invocation's
+   * `meta.signal`, so steps can forward either into their own async work, and
+   * it is checked between entries — an aborted signal stops the pipeline,
+   * skips the remaining steps as `'cancelled'`, and rolls back completed ones.
    */
   signal?: AbortSignal;
 }
@@ -46,10 +48,15 @@ interface Failure<TContext extends BaseContext> {
   step: Step<TContext>;
 }
 
-/** A completed step paired with its report, so rollback can update it in place. */
+/**
+ * A completed step paired with its report, so rollback can update it in place,
+ * and with the idempotency key its `run` was invoked under — the compensation's
+ * key is that key plus `:undo` (0.4.0 spec, section 1.4).
+ */
 interface Completed<TContext extends BaseContext> {
   step: Step<TContext>;
   report: StepReport;
+  idempotencyKey: string;
 }
 
 /**
@@ -102,31 +109,36 @@ type EntryOutcome<TContext extends BaseContext> =
  * deterministic (0.3.0 spec, sections 1.1.3 and 1.1.5).
  */
 type ParallelSlot =
-  | { kind: 'completed'; attempts: number; durationMs: number }
+  | {
+      kind: 'completed';
+      attempts: number;
+      durationMs: number;
+      idempotencyKey: string;
+    }
   | {
       kind: 'failed';
       error: StepError;
-      attempts: number;
       timedOut: boolean;
       durationMs: number;
+      // Both are absent when the failure came from resolving the step's
+      // idempotency key, which happens before the first attempt (section 1.4).
+      attempts?: number;
+      idempotencyKey?: string;
     }
   | { kind: 'cancelled' };
 
 /**
- * How {@link Pipeline.executeStepRun} is being driven, which decides two
- * behaviours that must differ between the executors:
+ * How {@link Pipeline.executeStepRun} is being driven, which decides how an
+ * abort seen through a failed attempt is classified:
  *
- * - `'sequential'` — the step owns the run exclusively: a timed attempt swaps
- *   `ctx.signal` to a per-attempt combined signal (section 1.2), and *any*
- *   abort of the base signal seen through a failed attempt is a pipeline
- *   cancellation (section 1.3) — nothing else can abort it.
- * - `'parallel'` — concurrent steps share one `ctx`, so `ctx.signal` stays the
- *   group-combined signal for the whole group (never swapped per attempt), and
- *   the base signal also aborts when a *peer* fails (0.3.0 spec, section
- *   1.1.3). A failed attempt is then classified as cancelled only when the
- *   rejection *is* the abort reason (a cooperative run forwarding
- *   `ctx.signal`); a step's own genuine failure that merely races the group
- *   abort stays a failure.
+ * - `'sequential'` — the base signal is the pipeline signal, which only an
+ *   external cancel can abort, so *any* abort observed through a failed
+ *   attempt is a pipeline cancellation (section 1.3).
+ * - `'parallel'` — the base signal is the group-combined signal, which also
+ *   aborts when a *peer* fails (0.3.0 spec, section 1.1.3). A failed attempt
+ *   counts as cancelled only when the rejection *is* the abort reason (a
+ *   cooperative run forwarding `meta.signal`); a step's own genuine failure
+ *   that merely races the group abort stays a failure.
  */
 type RunMode = 'sequential' | 'parallel';
 
@@ -226,9 +238,11 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    *
    * 1. derives the inner input via `mapInput(outerCtx)`;
    * 2. executes this pipeline on its **own fresh, isolated context**, with
-   *    the outer run's logger and the outer `ctx.signal` (so an outer cancel
-   *    — or, inside a parallel group, a peer failure — propagates into the
-   *    inner run), resolving engines from this pipeline's own `useEngine`
+   *    the outer run's logger and the wrapping step's own `meta.signal` (so an
+   *    outer cancel — or, inside a parallel group, a peer failure, or the
+   *    wrapping step's own timeout — propagates into the inner run, which
+   *    `ctx.signal` alone no longer carries: 0.4.0 spec, section 1.3),
+   *    resolving engines from this pipeline's own `useEngine`
    *    registrations plus the global registry — never the outer pipeline's
    *    scoped engines;
    * 3. on inner success calls `mapResult(innerResult, outerCtx)`;
@@ -253,11 +267,14 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         `Pipeline "${this.name}" asStep "${name}" requires a mapInput function`,
       );
     }
-    const run = async (outerCtx: TOuterContext): Promise<void> => {
+    const run = async (
+      outerCtx: TOuterContext,
+      meta: StepMeta,
+    ): Promise<void> => {
       const innerInput = options.mapInput(outerCtx);
       const innerResult = await this.execute(innerInput, {
         logger: outerCtx.logger,
-        signal: outerCtx.signal,
+        signal: meta.signal,
       });
       // Recorded before the failure throw so the executor can attach it to
       // the wrapping step's report whatever the outcome.
@@ -362,6 +379,8 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     input: TContext['input'],
     options: ExecuteOptions = {},
   ): Promise<Result<TContext>> {
+    // Covers everything the call does, rollback included (section 1.7).
+    const startedAt = performance.now();
     const logger = options.logger ?? noopLogger;
     // ctx.engines resolves pipeline-scoped engines first, then the global
     // registry, throwing UsageError on an unknown name (section 3.5, section 1.10).
@@ -373,7 +392,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     ) as TContext;
     if (options.dryRun) {
       // Planning, not execution (section 1.2): no run/undo, no hooks, no rollback.
-      return this.plan(ctx, logger);
+      return this.plan(ctx, logger, startedAt);
     }
     const steps: StepReport[] = [];
     // Steps whose `run` completed, in execution order — parallel steps are
@@ -439,14 +458,12 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       // surfaced unwrapped as `result.error` (and `PipelineError.cause` under
       // `throwOnError`) — not wrapped in a StepError.
       const rollbackErrors = await this.rollback(completed, ctx, logger);
-      const result: Result<TContext> = {
+      const result = this.buildResult(ctx, steps, startedAt, {
         ok: false,
-        context: ctx,
-        steps,
         error: cancellation.reason,
         rollbackErrors,
         aborted: true,
-      };
+      });
       await this.fireLifecycle(result, logger);
       if (options.throwOnError) {
         throw this.toPipelineError(result);
@@ -467,14 +484,12 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         );
       }
       const rollbackErrors = await this.rollback(completed, ctx, logger);
-      const result: Result<TContext> = {
+      const result = this.buildResult(ctx, steps, startedAt, {
         ok: false,
-        context: ctx,
-        steps,
         error: failures[0]!.error,
         rollbackErrors,
         aborted: false,
-      };
+      });
       await this.fireLifecycle(result, logger);
       if (options.throwOnError) {
         throw this.toPipelineError(result);
@@ -482,16 +497,44 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       return result;
     }
 
-    const result: Result<TContext> = {
+    const result = this.buildResult(ctx, steps, startedAt, {
       ok: true,
-      context: ctx,
-      steps,
       error: null,
       rollbackErrors: [],
       aborted: false,
-    };
+    });
     await this.fireLifecycle(result, logger);
     return result;
+  }
+
+  /**
+   * Assembles the final {@link Result}, stamping the fields every run carries
+   * however it ended: the execution identity (section 1.1), this pipeline's
+   * name, and the total wall-clock duration measured from the top of
+   * `execute` — so it includes rollback (section 1.7).
+   */
+  private buildResult(
+    ctx: TContext,
+    steps: StepReport[],
+    startedAt: number,
+    outcome: {
+      ok: boolean;
+      error: Error | null;
+      rollbackErrors: Error[];
+      aborted: boolean;
+    },
+  ): Result<TContext> {
+    return {
+      ok: outcome.ok,
+      context: ctx,
+      steps,
+      error: outcome.error,
+      rollbackErrors: outcome.rollbackErrors,
+      aborted: outcome.aborted,
+      executionId: ctx.executionId,
+      pipelineName: this.name,
+      durationMs: performance.now() - startedAt,
+    };
   }
 
   /**
@@ -544,12 +587,35 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     );
 
     const start = performance.now();
+    // Resolved once per invocation, before the first attempt, and reused for
+    // every retry (0.4.0 spec, section 1.4). A throwing key function is a step
+    // failure like any other user-code throw — the run never happens, so the
+    // report carries neither an attempt count nor a key.
+    let idempotencyKey: string;
+    try {
+      idempotencyKey = resolveIdempotencyKey(step, ctx);
+    } catch (raw) {
+      return {
+        status: 'failed',
+        failures: [
+          this.recordFailure(
+            ctx,
+            step,
+            raw,
+            performance.now() - start,
+            steps,
+            logger,
+          ),
+        ],
+      };
+    }
     // Run with the step's retry policy (section 1.1); only `run` is retried.
     const outcome = await this.executeStepRun(
       step,
       ctx,
       ctx.signal,
       'sequential',
+      idempotencyKey,
     );
     const durationMs = performance.now() - start;
     if (!outcome.ok) {
@@ -582,8 +648,11 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
             durationMs,
             steps,
             logger,
-            outcome.attempts,
-            outcome.timedOut,
+            {
+              attempts: outcome.attempts,
+              timedOut: outcome.timedOut,
+              idempotencyKey,
+            },
           ),
         ],
       };
@@ -595,10 +664,11 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       status: 'completed',
       durationMs,
       attempts: outcome.attempts,
+      idempotencyKey,
     };
     attachInnerResult(ctx, report);
     steps.push(report);
-    completed.push({ step, report });
+    completed.push({ step, report, idempotencyKey });
     logger.debug('step completed', {
       stepName: step.name,
       status: 'completed',
@@ -700,40 +770,67 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       // signal; every step in the group observes both.
       const group = new AbortController();
       const groupSignal = AbortSignal.any([group.signal, pipelineSignal]);
-      // Concurrent steps share the one mutable ctx, so ctx.signal is pinned to
-      // the group-combined signal for the whole group instead of the
-      // per-attempt timeout swap sequential steps get — concurrent swaps of a
-      // shared property would race. Timeouts still enforce via the per-attempt
-      // race inside runAttempt.
-      setContextSignal(ctx, groupSignal);
-      try {
-        const tasks: Promise<void>[] = [];
-        for (const { step, index } of runnable) {
-          await this.runHooks(
-            this.beforeHooks,
-            (hook) => hook(ctx, step),
-            'before',
-            step.name,
-            logger,
-          );
-          tasks.push(
-            this.runParallelStep(
-              step,
-              index,
-              ctx,
-              groupSignal,
-              group,
-              slots,
-              logger,
-            ),
-          );
+      // The group signal is never put on the shared ctx: concurrent steps
+      // share one context, so each step observes its own cancellation through
+      // its own `meta.signal`, derived from this group signal per attempt
+      // (0.4.0 spec, section 1.3). `ctx.signal` stays the pipeline signal.
+      const tasks: Promise<void>[] = [];
+      // A step whose idempotency key fails to resolve (section 1.4) fails
+      // before it ever runs. Aborting the group there and then would hand
+      // every peer launched afterwards an already-aborted signal — which
+      // fires no `abort` event, stranding a cooperative run that waits for
+      // one. So key failures are collected and the group is aborted once,
+      // below, when every other step is already in flight with a live signal.
+      let keyFailure: StepError | undefined;
+      for (const { step, index } of runnable) {
+        await this.runHooks(
+          this.beforeHooks,
+          (hook) => hook(ctx, step),
+          'before',
+          step.name,
+          logger,
+        );
+        const keyStart = performance.now();
+        let idempotencyKey: string;
+        try {
+          idempotencyKey = resolveIdempotencyKey(step, ctx);
+        } catch (raw) {
+          const error = new StepError(step.name, { cause: raw });
+          slots.set(index, {
+            kind: 'failed',
+            error,
+            timedOut: false,
+            durationMs: performance.now() - keyStart,
+          });
+          logger.debug('step failed', {
+            stepName: step.name,
+            status: 'failed',
+            ...describeError(raw),
+          });
+          // The first failure in declaration order is the group's reason,
+          // matching how `result.error` is chosen (section 1.1.3, point 4).
+          keyFailure ??= error;
+          continue;
         }
-        // Wait for every step to settle — completed, failed, or cancelled —
-        // before classification and rollback (section 1.1.3, point 1).
-        await Promise.allSettled(tasks);
-      } finally {
-        setContextSignal(ctx, pipelineSignal);
+        tasks.push(
+          this.runParallelStep(
+            step,
+            index,
+            ctx,
+            groupSignal,
+            group,
+            slots,
+            logger,
+            idempotencyKey,
+          ),
+        );
       }
+      if (keyFailure !== undefined) {
+        group.abort(keyFailure);
+      }
+      // Wait for every step to settle — completed, failed, or cancelled —
+      // before classification and rollback (section 1.1.3, point 1).
+      await Promise.allSettled(tasks);
     }
 
     // -- Phase 3: classification in declaration order (section 1.1.3, point 2). --
@@ -752,18 +849,30 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           status: 'completed',
           durationMs: slot.durationMs,
           attempts: slot.attempts,
+          idempotencyKey: slot.idempotencyKey,
         };
         attachInnerResult(ctx, report);
         steps.push(report);
-        completed.push({ step, report });
+        completed.push({
+          step,
+          report,
+          idempotencyKey: slot.idempotencyKey,
+        });
       } else if (slot.kind === 'failed') {
         const report: StepReport = {
           name: step.name,
           status: 'failed',
           durationMs: slot.durationMs,
           error: slot.error,
-          attempts: slot.attempts,
         };
+        // Absent when the step failed while resolving its idempotency key,
+        // before any attempt (section 1.4).
+        if (slot.attempts !== undefined) {
+          report.attempts = slot.attempts;
+        }
+        if (slot.idempotencyKey !== undefined) {
+          report.idempotencyKey = slot.idempotencyKey;
+        }
         if (slot.timedOut) {
           report.timedOut = true;
         }
@@ -815,6 +924,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     group: AbortController,
     slots: Map<number, ParallelSlot>,
     logger: Logger,
+    idempotencyKey: string,
   ): Promise<void> {
     const start = performance.now();
     const outcome = await this.executeStepRun(
@@ -822,6 +932,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       ctx,
       groupSignal,
       'parallel',
+      idempotencyKey,
     );
     const durationMs = performance.now() - start;
     if (outcome.ok) {
@@ -829,6 +940,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         kind: 'completed',
         attempts: outcome.attempts,
         durationMs,
+        idempotencyKey,
       });
       logger.debug('step completed', {
         stepName: step.name,
@@ -855,6 +967,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       attempts: outcome.attempts,
       timedOut: outcome.timedOut,
       durationMs,
+      idempotencyKey,
     });
     logger.debug('step failed', {
       stepName: step.name,
@@ -873,7 +986,11 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    * as a step failure (`'failed'`, `ok:false`) and planning stops there.
    * Hooks are execution observers, so they do not fire while planning.
    */
-  private async plan(ctx: TContext, logger: Logger): Promise<Result<TContext>> {
+  private async plan(
+    ctx: TContext,
+    logger: Logger,
+    startedAt: number,
+  ): Promise<Result<TContext>> {
     const steps: StepReport[] = [];
     let failure: Failure<TContext> | null = null;
 
@@ -910,23 +1027,19 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     }
 
     if (failure) {
-      return {
+      return this.buildResult(ctx, steps, startedAt, {
         ok: false,
-        context: ctx,
-        steps,
         error: failure.error,
         rollbackErrors: [],
         aborted: false,
-      };
+      });
     }
-    return {
+    return this.buildResult(ctx, steps, startedAt, {
       ok: true,
-      context: ctx,
-      steps,
       error: null,
       rollbackErrors: [],
       aborted: false,
-    };
+    });
   }
 
   /**
@@ -939,22 +1052,33 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    *
    * `baseSignal` is the pipeline signal for a sequential step, or the
    * group-combined signal for a parallel one (0.3.0 spec, section 1.1.3); it is
-   * passed to the inter-attempt delay so an abort wakes it early. An abort
-   * surfacing through an attempt or a woken delay yields the `cancelled`
-   * outcome rather than a failure — under which conditions depends on `mode`
-   * (see {@link RunMode}). A step with no `retry` runs exactly once
-   * (`attempts: 1`).
+   * passed to the inter-attempt delay so an abort wakes it early, and it is one
+   * input to each attempt's `meta.signal`. An abort surfacing through an attempt
+   * or a woken delay yields the `cancelled` outcome rather than a failure —
+   * under which conditions depends on `mode` (see {@link RunMode}). A step with
+   * no `retry` runs exactly once (`attempts: 1`).
+   *
+   * `idempotencyKey` was resolved once by the caller, before this loop, and is
+   * handed to every attempt unchanged (0.4.0 spec, section 1.4).
    */
   private async executeStepRun(
     step: Step<TContext>,
     ctx: TContext,
     baseSignal: AbortSignal,
     mode: RunMode,
+    idempotencyKey: string,
   ): Promise<RunOutcome> {
     const retry = step.retry;
     const maxAttempts = retry?.attempts ?? 1;
     for (let attempt = 1; ; attempt++) {
-      const result = await this.runAttempt(step, ctx, baseSignal, mode);
+      const result = await this.runAttempt(step, ctx, baseSignal, {
+        stepName: step.name,
+        pipelineName: this.name,
+        executionId: ctx.executionId,
+        attempt,
+        maxAttempts,
+        idempotencyKey,
+      });
       if (result.ok) {
         return { ok: true, attempts: attempt };
       }
@@ -1002,38 +1126,47 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 
   /**
    * Runs a single attempt of a step's `run`, applying its per-attempt timeout
-   * (section 1.2) when configured. With no timeout, `run` is awaited directly
-   * and `ctx.signal` is left alone. With a timeout, only the **timeout** races
-   * `run`: an abort of the base signal must never interrupt in-flight user
-   * code (section 1.3), so it cannot abandon the run — it is honoured between
-   * entries (and, for a cooperative `run`, by the run rejecting itself), then
-   * classified by {@link Pipeline.executeStepRun}.
+   * (section 1.2) when configured, and handing it this invocation's
+   * {@link StepMeta}.
    *
-   * Sequentially, `ctx.signal` is swapped to a fresh per-attempt
-   * `AbortSignal.any([AbortSignal.timeout(t), baseSignal])` so a cooperative
-   * `run` can self-abort on either the timeout or a cancel, and restored to
-   * the base signal afterwards. In a parallel group `ctx.signal` is shared by
-   * concurrent steps and stays the group-combined signal (see
-   * {@link RunMode}), so the timeout is enforced by the race alone.
-   * `timedOut` reflects whether the timeout fired.
+   * `meta.signal` is built **fresh per attempt** as
+   * `AbortSignal.any([...])` over the per-attempt timeout (when set) and the
+   * base signal — the pipeline signal for a sequential step, the
+   * group-combined signal inside a parallel group. Because it is a distinct
+   * object per invocation, concurrently running steps each observe their own
+   * timeout without disturbing a peer's, which a single shared `ctx.signal`
+   * could never express (0.4.0 spec, section 1.3). `ctx.signal` itself is
+   * never touched.
+   *
+   * With a timeout, only the **timeout** races `run`: an abort of the base
+   * signal must never interrupt in-flight user code (section 1.3), so it
+   * cannot abandon the run — it is honoured between entries (and, for a
+   * cooperative `run` watching `meta.signal`, by the run rejecting itself),
+   * then classified by {@link Pipeline.executeStepRun}. `timedOut` reflects
+   * whether the timeout fired.
    */
   private async runAttempt(
     step: Step<TContext>,
     ctx: TContext,
     baseSignal: AbortSignal,
-    mode: RunMode,
+    meta: Omit<StepMeta, 'signal'>,
   ): Promise<AttemptResult> {
-    if (step.timeout === undefined) {
+    const timeoutSignal =
+      step.timeout === undefined
+        ? undefined
+        : AbortSignal.timeout(step.timeout);
+    const signal =
+      timeoutSignal === undefined
+        ? AbortSignal.any([baseSignal])
+        : AbortSignal.any([timeoutSignal, baseSignal]);
+    const stepMeta: StepMeta = { ...meta, signal };
+    if (timeoutSignal === undefined) {
       try {
-        await step.run(ctx);
+        await step.run(ctx, stepMeta);
         return { ok: true };
       } catch (error) {
         return { ok: false, error, timedOut: false };
       }
-    }
-    const timeoutSignal = AbortSignal.timeout(step.timeout);
-    if (mode === 'sequential') {
-      setContextSignal(ctx, AbortSignal.any([timeoutSignal, baseSignal]));
     }
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -1043,16 +1176,15 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           { once: true },
         );
       });
-      await Promise.race([Promise.resolve(step.run(ctx)), timeoutPromise]);
+      await Promise.race([
+        Promise.resolve(step.run(ctx, stepMeta)),
+        timeoutPromise,
+      ]);
       return { ok: true };
     } catch (error) {
       // The per-attempt timeout firing is what defines a timeout, regardless of
       // which racer rejected first.
       return { ok: false, error, timedOut: timeoutSignal.aborted };
-    } finally {
-      if (mode === 'sequential') {
-        setContextSignal(ctx, baseSignal);
-      }
     }
   }
 
@@ -1060,12 +1192,13 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    * Records a step failure: wraps the raw thrown value in a {@link StepError}
    * (preserving it as `.cause`, section 3.8), pushes a `'failed'` report (section 3.4), logs
    * the lifecycle at `debug` with names/types only (section 1.10), and returns the
-   * failure so `execute` can fire `onError` and roll back. `attempts` is recorded
-   * when the failure came from a step's `run` (a guard failure leaves it unset,
-   * since `run` was never reached); `timedOut` marks a run aborted by its
-   * per-attempt timeout (section 1.2). A pipeline-as-step failure additionally
-   * carries the inner pipeline's `Result` as `innerResult` (0.3.0 spec,
-   * section 1.2.5).
+   * failure so `execute` can fire `onError` and roll back. `run` details are
+   * recorded only when the failure came from a step's `run`: its attempt count,
+   * the idempotency key it was invoked under (0.4.0 spec, section 1.4), and
+   * whether its per-attempt timeout fired (section 1.2). A failure raised before
+   * the run — a throwing guard, or a throwing idempotency-key function — leaves
+   * all three unset. A pipeline-as-step failure additionally carries the inner
+   * pipeline's `Result` as `innerResult` (0.3.0 spec, section 1.2.5).
    */
   private recordFailure(
     ctx: TContext,
@@ -1074,8 +1207,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     durationMs: number,
     steps: StepReport[],
     logger: Logger,
-    attempts?: number,
-    timedOut?: boolean,
+    run?: { attempts: number; timedOut: boolean; idempotencyKey: string },
   ): Failure<TContext> {
     const error = new StepError(step.name, { cause: raw });
     const report: StepReport = {
@@ -1084,11 +1216,12 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       durationMs,
       error,
     };
-    if (attempts !== undefined) {
-      report.attempts = attempts;
-    }
-    if (timedOut) {
-      report.timedOut = true;
+    if (run !== undefined) {
+      report.attempts = run.attempts;
+      report.idempotencyKey = run.idempotencyKey;
+      if (run.timedOut) {
+        report.timedOut = true;
+      }
     }
     attachInnerResult(ctx, report);
     steps.push(report);
@@ -1160,6 +1293,12 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    * remaining undos, since compensations are independent. Completed steps with
    * no `undo` declare themselves to need none and stay `'completed'`. Returns
    * the collected undo failures (possibly empty).
+   *
+   * Each `undo` receives its own {@link StepMeta} (0.4.0 spec, section 1.2):
+   * `attempt` and `maxAttempts` are `1` because compensations are never
+   * retried, the key is the run key plus `:undo`, and the signal is the
+   * pipeline signal — a compensation must be allowed to finish, so it is not
+   * bound by the step's per-attempt timeout.
    */
   private async rollback(
     completed: Completed<TContext>[],
@@ -1168,12 +1307,20 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   ): Promise<Error[]> {
     const rollbackErrors: Error[] = [];
     for (let i = completed.length - 1; i >= 0; i--) {
-      const { step, report } = completed[i]!;
+      const { step, report, idempotencyKey } = completed[i]!;
       if (!step.undo) {
         continue;
       }
       try {
-        await step.undo(ctx);
+        await step.undo(ctx, {
+          stepName: step.name,
+          pipelineName: this.name,
+          executionId: ctx.executionId,
+          attempt: 1,
+          maxAttempts: 1,
+          idempotencyKey: `${idempotencyKey}:undo`,
+          signal: ctx.signal,
+        });
         report.status = 'rolled-back';
         logger.debug('step rolled back', {
           stepName: step.name,
@@ -1313,15 +1460,30 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 }
 
 /**
- * Reassigns the run-scoped `signal` on the context. To consumers `ctx.signal` is
- * `readonly` (section 1.5), but the pipeline swaps it to a per-attempt combined
- * timeout/cancellation signal during a sequential timed run (section 1.2), and
- * to the group-combined signal for the duration of a parallel group (0.3.0
- * spec, section 1.1.3), restoring it afterwards. The context is per-`execute`,
- * so this stays re-entrancy-safe.
+ * Resolves the idempotency key for one step invocation (0.4.0 spec, section
+ * 1.4). Called **once, before the first attempt**, and the result reused for
+ * every retry — a key that changed between attempts would tell the downstream
+ * service each retry is a new operation, which is exactly what the key exists
+ * to prevent.
+ *
+ * A configured string is used verbatim; a configured function is evaluated with
+ * the run context, so keys can derive from business data. Otherwise the default
+ * is `` `${executionId}:${stepName}` ``, unique per execution and per step. A
+ * throwing key function propagates to the caller, which records it as a step
+ * failure (it depends on runtime context, so it is not misuse).
  */
-function setContextSignal(ctx: BaseContext, signal: AbortSignal): void {
-  (ctx as { signal: AbortSignal }).signal = signal;
+function resolveIdempotencyKey<TContext extends BaseContext>(
+  step: Step<TContext>,
+  ctx: TContext,
+): string {
+  const configured = step.idempotencyKey;
+  if (typeof configured === 'string') {
+    return configured;
+  }
+  if (typeof configured === 'function') {
+    return configured(ctx);
+  }
+  return `${ctx.executionId}:${step.name}`;
 }
 
 /**

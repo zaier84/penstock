@@ -25,6 +25,7 @@ export class Step<TContext extends BaseContext = BaseContext> {
   readonly undo?: UndoFn<TContext>;
   readonly retry?: RetryOptions;
   readonly timeout?: number;
+  readonly idempotencyKey?: string | ((ctx: TContext) => string);
 
   constructor(
     name: string,
@@ -54,6 +55,21 @@ export class Step<TContext extends BaseContext = BaseContext> {
     if (options.timeout !== undefined && options.timeout <= 0) {
       throw new UsageError(`Step "${name}" timeout must be greater than 0`);
     }
+    // An idempotency key override is either a verbatim non-empty string or a
+    // function evaluated once per invocation (0.4.0 spec, section 1.4).
+    // Anything else is misuse and fails fast; a function that throws at
+    // runtime is a step failure instead, since it depends on the context.
+    if (options.idempotencyKey !== undefined) {
+      const key: unknown = options.idempotencyKey;
+      const usable =
+        typeof key === 'function' ||
+        (typeof key === 'string' && key.length > 0);
+      if (!usable) {
+        throw new UsageError(
+          `Step "${name}" idempotencyKey must be a non-empty string or a function`,
+        );
+      }
+    }
     this.name = name;
     this.run = options.run;
     // Keep optional config truly absent when not supplied (mirrors PipelineError).
@@ -69,6 +85,9 @@ export class Step<TContext extends BaseContext = BaseContext> {
     if (options.timeout !== undefined) {
       this.timeout = options.timeout;
     }
+    if (options.idempotencyKey !== undefined) {
+      this.idempotencyKey = options.idempotencyKey;
+    }
   }
 
   /**
@@ -82,6 +101,7 @@ export class Step<TContext extends BaseContext = BaseContext> {
       undo: this.undo,
       retry: this.retry,
       timeout: this.timeout,
+      idempotencyKey: this.idempotencyKey,
     });
   }
 }

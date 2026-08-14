@@ -68,6 +68,9 @@ describe('errors', () => {
       error,
       rollbackErrors: [],
       aborted: false,
+      executionId: 'exec-1',
+      pipelineName: 'p',
+      durationMs: 1,
     });
 
     it('carries the result and originating cause; no rollbackErrors by default', () => {

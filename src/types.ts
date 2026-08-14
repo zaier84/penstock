@@ -2,17 +2,57 @@ import type { BaseContext } from './context';
 import type { Step } from './step';
 
 /**
- * The work a `Step` performs: receives the shared context and may mutate it.
- * Returns nothing, synchronously or asynchronously.
+ * Per-invocation metadata handed to a step's `run` and `undo` as a second
+ * argument (0.4.0 spec, section 1.2). It identifies *this* invocation — which
+ * execution, which attempt, under which idempotency key, and with which
+ * `AbortSignal` — none of which the shared context can express, since one
+ * context is threaded through every step of a run and shared by the concurrent
+ * steps of a parallel group.
+ *
+ * Guards deliberately receive no metadata: they are contractually pure
+ * predicates that dry-run relies on evaluating safely (section 1.2), and an
+ * attempt number or an idempotency key would invite side-effectful guards.
+ */
+export interface StepMeta {
+  /** The step's name, as declared. */
+  readonly stepName: string;
+  /** The pipeline's name. */
+  readonly pipelineName: string;
+  /** Unique id for this `execute()` call. */
+  readonly executionId: string;
+  /** 1-based attempt number. Always `1` for `undo` — compensations are not retried. */
+  readonly attempt: number;
+  /** Total attempts permitted for this step (`1` when no retry is configured). */
+  readonly maxAttempts: number;
+  /** Stable across every attempt of this step within this execution (section 1.4). */
+  readonly idempotencyKey: string;
+  /**
+   * This invocation's own signal: the per-attempt timeout combined with the
+   * parallel group's signal (when inside a group) and the pipeline signal,
+   * created fresh per attempt. Prefer it over `ctx.signal` inside a step —
+   * `ctx.signal` answers only "was the whole pipeline cancelled" (section 1.3).
+   * For `undo` it is the pipeline signal: a compensation must be allowed to
+   * finish, so it is not bound by the step's timeout.
+   */
+  readonly signal: AbortSignal;
+}
+
+/**
+ * The work a `Step` performs: receives the shared context (which it may mutate)
+ * and this invocation's {@link StepMeta}. Returns nothing, synchronously or
+ * asynchronously. A function declaring fewer parameters stays valid — JavaScript
+ * ignores surplus arguments — so single-argument runs are unaffected.
  */
 export type RunFn<TContext extends BaseContext> = (
   ctx: TContext,
+  meta: StepMeta,
 ) => void | Promise<void>;
 
 /**
  * A step's optional guard — a pure predicate over the context. A falsy result
  * skips the step. Guards must not mutate the context or cause side effects;
- * dry-run (section 1.2) relies on this contract.
+ * dry-run (section 1.2) relies on this contract. Guards take the context alone
+ * (0.4.0 spec, section 1.2).
  */
 export type GuardFn<TContext extends BaseContext> = (
   ctx: TContext,
@@ -20,10 +60,13 @@ export type GuardFn<TContext extends BaseContext> = (
 
 /**
  * A step's optional compensation, run in reverse order during rollback when a
- * later step fails (section 1.7).
+ * later step fails (section 1.7). Like `run` it receives the context and this
+ * invocation's {@link StepMeta} — whose `idempotencyKey` is the undo key and
+ * whose `signal` is the pipeline signal (0.4.0 spec, section 1.2).
  */
 export type UndoFn<TContext extends BaseContext> = (
   ctx: TContext,
+  meta: StepMeta,
 ) => void | Promise<void>;
 
 /**
@@ -61,6 +104,16 @@ export interface StepOptions<TContext extends BaseContext> {
    * at construction.
    */
   timeout?: number;
+  /**
+   * Overrides this step's idempotency key (0.4.0 spec, section 1.4), which
+   * defaults to `` `${executionId}:${stepName}` ``. A string is used verbatim; a
+   * function is evaluated **once per step invocation, before the first attempt**,
+   * and its result reused for every retry — re-evaluating per attempt would
+   * defeat the purpose. A non-string, empty string, or non-function value throws
+   * a `UsageError` at construction; a function that throws at runtime is a step
+   * failure, not misuse.
+   */
+  idempotencyKey?: string | ((ctx: TContext) => string);
 }
 
 /** Lifecycle status of a single step within a `Result`. */
@@ -98,6 +151,12 @@ export interface StepReport {
   // The inner context type is intentionally erased (0.3.0 spec, section 3.2).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   innerResult?: Result<any>;
+  /**
+   * The idempotency key this step's `run` was invoked with (0.4.0 spec,
+   * section 1.4), making retry-safety auditable from the `Result`. Present for
+   * every step that ran; absent for skipped and would-run entries.
+   */
+  idempotencyKey?: string;
 }
 
 /** The structured outcome of `pipeline.execute()` (section 3.4). */
@@ -119,6 +178,19 @@ export interface Result<TContext extends BaseContext> {
    * dry-run plans.
    */
   aborted: boolean;
+  /**
+   * Unique id for this `execute()` call (0.4.0 spec, section 1.1), equal to
+   * `context.executionId`. A pipeline run via `asStep` is a separate execution
+   * with its own id, correlated through `StepReport.innerResult`.
+   */
+  executionId: string;
+  /** The pipeline's name, so a `Result` is self-describing once detached (section 1.7). */
+  pipelineName: string;
+  /**
+   * Total wall-clock time for the `execute()` call in milliseconds, measured
+   * with `performance.now()` and including any rollback (section 1.7).
+   */
+  durationMs: number;
 }
 
 /**

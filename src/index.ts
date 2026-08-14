@@ -22,6 +22,7 @@ export type {
   Result,
   RetryOptions,
   RunFn,
+  StepMeta,
   StepOptions,
   StepReport,
   StepStatus,

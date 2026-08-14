@@ -5,7 +5,7 @@ import { StepError, UsageError } from '../src/errors';
 import type { Logger } from '../src/logger';
 import { Pipeline } from '../src/pipeline';
 import { Step } from '../src/step';
-import type { Result, StepReport } from '../src/types';
+import type { Result, StepMeta, StepReport } from '../src/types';
 
 interface Ctx extends BaseContext {
   inventory?: string;
@@ -49,12 +49,15 @@ const sleepRun = (ms: number) => () =>
 
 /**
  * A cooperative run that never finishes on its own: it settles only by
- * rejecting with `ctx.signal.reason` when the signal aborts (the pattern the
+ * rejecting with `meta.signal.reason` when that signal aborts (the pattern the
  * README recommends for forwarding cancellation into a step's own async work).
+ * Inside a parallel group `meta.signal` is the level that carries a peer
+ * failure as well as a pipeline cancel; `ctx.signal` carries only the latter
+ * (0.4.0 spec, section 1.3).
  */
-const cooperativeRun = (ctx: Ctx) =>
+const cooperativeRun = (_ctx: Ctx, meta: StepMeta) =>
   new Promise<void>((_resolve, reject) => {
-    ctx.signal.addEventListener('abort', () => reject(ctx.signal.reason), {
+    meta.signal.addEventListener('abort', () => reject(meta.signal.reason), {
       once: true,
     });
   });
@@ -310,12 +313,12 @@ describe('Pipeline parallel groups (0.3.0 section 1.1)', () => {
             throw new Error('first failure');
           }),
           new Step<Ctx>('late-fail', {
-            run: (ctx) =>
+            run: (_ctx, meta) =>
               new Promise<void>((_resolve, reject) => {
                 // Rejects with its OWN error once the group abort arrives — a
                 // genuine failure racing the abort, not a cooperative cancel
                 // (which would reject with the abort reason itself).
-                ctx.signal.addEventListener('abort', () => reject(ownError), {
+                meta.signal.addEventListener('abort', () => reject(ownError), {
                   once: true,
                 });
               }),
@@ -450,10 +453,10 @@ describe('Pipeline parallel groups (0.3.0 section 1.1)', () => {
         .addParallel([
           new Step<Ctx>('done', { run: () => {}, undo: undoDone }),
           new Step<Ctx>('waiting', {
-            run: (ctx) => {
+            run: (ctx, meta) => {
               // Fire the pipeline cancel while this step is in flight.
               setTimeout(() => controller.abort(reason), 0);
-              return cooperativeRun(ctx);
+              return cooperativeRun(ctx, meta);
             },
           }),
         ])

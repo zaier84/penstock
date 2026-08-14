@@ -132,15 +132,17 @@ describe('Step', () => {
       expect(step.timeout).toBeUndefined();
     });
 
-    it('preserves retry and timeout through .when()', () => {
+    it('preserves retry, timeout, and idempotencyKey through .when()', () => {
       const original = new Step<TestCtx>('x', {
         run: noopRun,
         retry: { attempts: 3, delayMs: 50 },
         timeout: 2000,
+        idempotencyKey: 'fixed-key',
       });
       const guarded = original.when(() => true);
       expect(guarded.retry).toEqual({ attempts: 3, delayMs: 50 });
       expect(guarded.timeout).toBe(2000);
+      expect(guarded.idempotencyKey).toBe('fixed-key');
     });
   });
 

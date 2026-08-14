@@ -36,7 +36,7 @@ interface CheckoutInput {
   fraudulent?: boolean;
   /** charge-payment throws (scenario b). */
   declineCard?: boolean;
-  /** fetch-pricing waits cooperatively on ctx.signal (scenarios c and d). */
+  /** fetch-pricing waits cooperatively on meta.signal (scenarios c and d). */
   holdPricing?: boolean;
   /** The nested pipeline's assess step waits cooperatively (scenario d). */
   holdFraud?: boolean;
@@ -157,13 +157,15 @@ function buildCheckout() {
         },
       }),
       new Step<CheckoutCtx>('fetch-pricing', {
-        run: (ctx) => {
+        run: (ctx, meta) => {
           if (ctx.input.holdPricing) {
-            // Cooperative: settles only when the group/pipeline signal aborts.
+            // Cooperative: settles only when this invocation's signal aborts —
+            // meta.signal carries the group abort (a peer failing) as well as
+            // a pipeline cancel (0.4.0 spec, section 1.3).
             return new Promise<void>((_resolve, reject) => {
-              ctx.signal.addEventListener(
+              meta.signal.addEventListener(
                 'abort',
-                () => reject(ctx.signal.reason),
+                () => reject(meta.signal.reason),
                 { once: true },
               );
             });
