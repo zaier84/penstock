@@ -1,6 +1,6 @@
 {
   "name": "penstock",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Composable, testable backend workflows for Node.js — use-cases, pipelines, steps, and engines, with first-class reverse-order rollback. Zero runtime dependencies.",
   "keywords": [
     "orchestration",
@@ -85,7 +85,8 @@
     "example:order": "tsx examples/order-processing.ts",
     "example:onboarding": "tsx examples/user-onboarding.ts",
     "example:reliability": "tsx examples/reliability.ts",
-    "example:composition": "tsx examples/composition.ts"
+    "example:composition": "tsx examples/composition.ts",
+    "example:production": "tsx examples/production.ts"
   },
   "dependencies": {},
   "peerDependencies": {
