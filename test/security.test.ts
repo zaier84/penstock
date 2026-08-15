@@ -6,7 +6,7 @@ import { StepError, UsageError } from '../src/errors';
 import { Pipeline } from '../src/pipeline';
 import { serializeResult } from '../src/serialize';
 import { Step } from '../src/step';
-import type { Result } from '../src/types';
+import type { Result, Tracer } from '../src/types';
 
 // The names that must be rejected everywhere a name is accepted (section 1.10).
 const RESERVED = ['__proto__', 'prototype', 'constructor'];
@@ -68,6 +68,40 @@ describe('security invariants (section 1.10)', () => {
       // Same invariant as the logger: payloads never leave the process by
       // default, only names, statuses, durations, and error types/messages.
       expect(JSON.stringify(serialized)).not.toContain('sk_live_do_not_log');
+    });
+
+    it('never puts a context or input value in a trace attribute (0.4.0 section 1.8)', async () => {
+      const attributes: [string, string | number | boolean][] = [];
+      const names: string[] = [];
+      const tracer: Tracer = {
+        startSpan(name) {
+          names.push(name);
+          return {
+            setAttribute(key, value) {
+              attributes.push([key, value]);
+            },
+            recordException() {},
+            setStatus() {},
+            end() {},
+          };
+        },
+      };
+
+      await new Pipeline('traced')
+        .addStep(
+          new Step('a', (ctx) => {
+            (ctx as { copied?: string }).copied = (
+              ctx.input as { apiKey: string }
+            ).apiKey;
+          }),
+        )
+        .execute({ apiKey: 'sk_live_do_not_trace' }, { tracer });
+
+      // Same invariant as the logger and the serializer: only names, ids,
+      // statuses, counts and durations ever leave the process.
+      expect(attributes.length).toBeGreaterThan(0);
+      const rendered = JSON.stringify({ names, attributes });
+      expect(rendered).not.toContain('sk_live_do_not_trace');
     });
 
     it('does not pollute Object.prototype through a __proto__ error property', () => {

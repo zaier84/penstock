@@ -32,5 +32,7 @@ export type {
   StepOptions,
   StepReport,
   StepStatus,
+  TraceSpan,
+  Tracer,
   UndoFn,
 } from './types';

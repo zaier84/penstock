@@ -2,6 +2,7 @@ import { describe, expectTypeOf, it } from 'vitest';
 
 import type {
   BaseContext,
+  ExecuteOptions,
   GuardFn,
   LifecycleCallback,
   ParallelOptions,
@@ -12,9 +13,13 @@ import type {
   SerializedResult,
   SerializedStepReport,
   StepMeta,
+  TraceSpan,
+  Tracer,
   UndoFn,
 } from '../src/index';
 import { Pipeline, serializeResult, Step } from '../src/index';
+import { otelTracer } from '../src/otel/index';
+import type { OtelTracerOptions } from '../src/otel/index';
 
 interface OrderInput {
   items: { price: number; qty: number }[];
@@ -146,6 +151,64 @@ describe('generic context inference (section 3.3)', () => {
       // @ts-expect-error — the options are the documented three, nothing else.
       includeSecrets: true,
     });
+  });
+
+  it('types the tracer surface and its execute options (0.4.0 sections 1.8 and 1.9)', async () => {
+    const span: TraceSpan = {
+      setAttribute(key, value) {
+        expectTypeOf(key).toEqualTypeOf<string>();
+        expectTypeOf(value).toEqualTypeOf<string | number | boolean>();
+      },
+      recordException(error) {
+        // Deliberately `unknown`: a step may throw anything at all.
+        expectTypeOf(error).toEqualTypeOf<unknown>();
+      },
+      setStatus(status, message) {
+        expectTypeOf(status).toEqualTypeOf<'ok' | 'error'>();
+        expectTypeOf(message).toEqualTypeOf<string | undefined>();
+      },
+      end() {},
+    };
+    const tracer: Tracer = {
+      startSpan(name, parent) {
+        expectTypeOf(name).toEqualTypeOf<string>();
+        expectTypeOf(parent).toEqualTypeOf<TraceSpan | undefined>();
+        return span;
+      },
+    };
+
+    expectTypeOf<ExecuteOptions['tracer']>().toEqualTypeOf<
+      Tracer | undefined
+    >();
+    expectTypeOf<ExecuteOptions['parentSpan']>().toEqualTypeOf<
+      TraceSpan | undefined
+    >();
+    const result = await new Pipeline<OrderCtx>('p').execute(
+      { items: [] },
+      { tracer, parentSpan: span },
+    );
+    expectTypeOf(result).toEqualTypeOf<Result<OrderCtx>>();
+
+    new Pipeline<OrderCtx>('p2').execute(
+      { items: [] },
+      // @ts-expect-error — a tracer must implement startSpan.
+      { tracer: {} },
+    );
+  });
+
+  it('types the penstock/otel adapter as a core Tracer (0.4.0 section 1.9)', () => {
+    expectTypeOf(otelTracer()).toEqualTypeOf<Tracer>();
+    expectTypeOf(
+      otelTracer({ name: 'app', version: '1.0.0' }),
+    ).toEqualTypeOf<Tracer>();
+    expectTypeOf<OtelTracerOptions['name']>().toEqualTypeOf<
+      string | undefined
+    >();
+    expectTypeOf<OtelTracerOptions['version']>().toEqualTypeOf<
+      string | undefined
+    >();
+    // @ts-expect-error — the options are the documented two, nothing else.
+    otelTracer({ endpoint: 'http://localhost:4318' });
   });
 
   it('types asStep by the outer context and the inner input (0.3.0 section 1.2)', () => {

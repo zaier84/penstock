@@ -31,3 +31,18 @@ export function assertSafeName(
     throw new UsageError(`${kind} name "${name}" is reserved and not allowed`);
   }
 }
+
+/**
+ * Reduces a thrown value to a loggable `{ errorType, errorMessage }` — names and
+ * types only, never raw payloads or context (section 1.10). Handles non-Error throws.
+ * Shared by every contained-callback log site: hooks, lifecycle callbacks, and
+ * tracer calls (0.4.0 spec, section 1.8).
+ */
+export function describeError(err: unknown): {
+  errorType: string;
+  errorMessage: string;
+} {
+  return err instanceof Error
+    ? { errorType: err.name, errorMessage: err.message }
+    : { errorType: typeof err, errorMessage: String(err) };
+}

@@ -5,10 +5,22 @@ import { createContext } from './context';
 import { createEngineAccessor } from './engine';
 import type { Engine } from './engine';
 import { PipelineError, StepError, UsageError } from './errors';
-import { assertSafeName } from './internal';
+import { assertSafeName, describeError } from './internal';
 import type { Logger } from './logger';
 import { noopLogger } from './logger';
 import { Step } from './step';
+import type { SafeSpan, Tracing } from './tracing';
+import {
+  createTracing,
+  recordAttemptOutcome,
+  recordPipelineOutcome,
+  recordPipelineStart,
+  recordStepKey,
+  recordStepOutcome,
+  recordStepStart,
+  recordUndoOutcome,
+  recordUndoStart,
+} from './tracing';
 import type {
   AfterHook,
   AsStepOptions,
@@ -22,6 +34,8 @@ import type {
   StepMeta,
   StepOptions,
   StepReport,
+  TraceSpan,
+  Tracer,
 } from './types';
 
 /**
@@ -41,12 +55,45 @@ export interface ExecuteOptions {
    * skips the remaining steps as `'cancelled'`, and rolls back completed ones.
    */
   signal?: AbortSignal;
+  /**
+   * Tracer for this run (0.4.0 spec, section 1.8). Omitted, no spans are
+   * emitted at all; supplied, the run produces a pipeline span with a step
+   * span per step, attempt spans for retrying steps, and a compensation span
+   * per `undo`. Dry-run never emits spans. Every call penstock makes on the
+   * tracer is contained: a tracer that throws is logged at `warn` and cannot
+   * change the `Result`.
+   */
+  tracer?: Tracer;
+  /**
+   * Parent for this run's pipeline span (0.4.0 spec, section 1.8). Exported
+   * because {@link Pipeline.asStep} sets it — nesting an inner pipeline's span
+   * under the wrapping step's span — but usable directly to graft a penstock
+   * run onto a span your own code already started.
+   */
+  parentSpan?: TraceSpan;
 }
 
 /** The originating failure captured when a step's `guard` or `run` throws. */
 interface Failure<TContext extends BaseContext> {
   error: StepError;
   step: Step<TContext>;
+  /**
+   * The `'failed'` report just pushed, so the caller can close out the step's
+   * span from the same facts the `Result` reports (0.4.0 spec, section 1.8).
+   */
+  report: StepReport;
+}
+
+/**
+ * One level of the span tree, threaded through the executor: the run's span
+ * factory plus the span new spans hang off. `execute` builds the pipeline-level
+ * scope; each step builds a step-level one for its attempt spans. Bundling the
+ * pair keeps the internals to a single extra parameter, and an untraced run
+ * gets the inert factory so no path needs an `if (tracer)` branch.
+ */
+interface TraceScope {
+  readonly tracing: Tracing;
+  readonly span: SafeSpan;
 }
 
 /**
@@ -297,10 +344,23 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       meta: StepMeta,
     ): Promise<void> => {
       const innerInput = options.mapInput(outerCtx);
-      const innerResult = await this.execute(innerInput, {
+      const innerOptions: ExecuteOptions = {
         logger: outerCtx.logger,
         signal: meta.signal,
-      });
+      };
+      // The inner run is a separate execution with its own pipeline span; it
+      // is parented to the wrapping step's span so the trace mirrors the
+      // composition (0.4.0 spec, section 1.8). Both handles come from the
+      // outer run, which published them for exactly this purpose.
+      const handle = traceHandles.get(outerCtx);
+      if (handle !== undefined) {
+        innerOptions.tracer = handle.tracer;
+        const parentSpan = handle.spans.get(name);
+        if (parentSpan !== undefined) {
+          innerOptions.parentSpan = parentSpan;
+        }
+      }
+      const innerResult = await this.execute(innerInput, innerOptions);
       // Recorded before the failure throw so the executor can attach it to
       // the wrapping step's report whatever the outcome.
       storeInnerResult(outerCtx, name, innerResult);
@@ -416,9 +476,54 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       options.signal,
     ) as TContext;
     if (options.dryRun) {
-      // Planning, not execution (section 1.2): no run/undo, no hooks, no rollback.
+      // Planning, not execution (section 1.2): no run/undo, no hooks, no
+      // rollback — and no spans either (0.4.0 spec, section 1.8), which is why
+      // this returns before any tracing is set up.
       return this.plan(ctx, logger, startedAt);
     }
+    // Tracing is per-run state like every other execute-local variable (section
+    // 3.2). An untraced run gets the inert factory rather than a null check.
+    const tracing = createTracing(options.tracer, logger);
+    const pipelineSpan = tracing.pipeline(this.name, options.parentSpan);
+    const trace: TraceScope = { tracing, span: pipelineSpan };
+    if (options.tracer !== undefined) {
+      // Published for the whole run so a pipeline-as-step can parent its inner
+      // run's span to the wrapping step's span (section 1.8). Keyed by this
+      // call's context, so concurrent runs never share it (section 3.2).
+      traceHandles.set(ctx, {
+        tracer: options.tracer,
+        spans: new Map<string, TraceSpan>(),
+      });
+    }
+    try {
+      recordPipelineStart(
+        pipelineSpan,
+        this.name,
+        ctx.executionId,
+        // Every step's name is registered there, so its size is the step
+        // count — parallel groups expanded.
+        this.stepNames.size,
+      );
+      return await this.runToResult(ctx, options, logger, trace, startedAt);
+    } finally {
+      // The one place the pipeline span is ended, so no path can leak it —
+      // including `throwOnError`, which throws out of the call above (section 1.8).
+      pipelineSpan.end();
+    }
+  }
+
+  /**
+   * The body of {@link Pipeline.execute}, split out so the pipeline span's
+   * lifetime is a single `try`/`finally` around one call. Per section 3.2 all
+   * run state is local to this method.
+   */
+  private async runToResult(
+    ctx: TContext,
+    options: ExecuteOptions,
+    logger: Logger,
+    trace: TraceScope,
+    startedAt: number,
+  ): Promise<Result<TContext>> {
     const steps: StepReport[] = [];
     // Steps whose `run` completed, in execution order — parallel steps are
     // registered in declaration order once their group settles. Walked
@@ -440,7 +545,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       // steps roll back with the abort reason.
       if (ctx.signal.aborted) {
         cancellation = { reason: ctx.signal.reason };
-        this.markCancelled(i, steps, logger);
+        this.markCancelled(i, steps, logger, trace);
         break;
       }
       const entry = this.entries[i]!;
@@ -452,6 +557,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           steps,
           completed,
           logger,
+          trace,
         );
       } else {
         outcome = await this.executeParallelEntry(
@@ -461,6 +567,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           steps,
           completed,
           logger,
+          trace,
         );
       }
       if (outcome.status === 'failed') {
@@ -472,7 +579,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         // run, or a cancel during a parallel group) and has already reported
         // its own steps; mark only the entries after it.
         cancellation = { reason: outcome.reason };
-        this.markCancelled(i + 1, steps, logger);
+        this.markCancelled(i + 1, steps, logger, trace);
         break;
       }
     }
@@ -483,13 +590,14 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       // the pre-aborted case has no step to hand the hook. The abort reason is
       // surfaced unwrapped as `result.error` (and `PipelineError.cause` under
       // `throwOnError`) — not wrapped in a StepError.
-      const rollbackErrors = await this.rollback(completed, ctx, logger);
+      const rollbackErrors = await this.rollback(completed, ctx, logger, trace);
       const result = this.buildResult(ctx, steps, startedAt, {
         ok: false,
         error: cancellation.reason,
         rollbackErrors,
         aborted: true,
       });
+      recordPipelineOutcome(trace.span, result);
       await this.fireLifecycle(result, logger);
       if (options.throwOnError) {
         throw this.toPipelineError(result);
@@ -509,13 +617,14 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           logger,
         );
       }
-      const rollbackErrors = await this.rollback(completed, ctx, logger);
+      const rollbackErrors = await this.rollback(completed, ctx, logger, trace);
       const result = this.buildResult(ctx, steps, startedAt, {
         ok: false,
         error: failures[0]!.error,
         rollbackErrors,
         aborted: false,
       });
+      recordPipelineOutcome(trace.span, result);
       await this.fireLifecycle(result, logger);
       if (options.throwOnError) {
         throw this.toPipelineError(result);
@@ -529,6 +638,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       rollbackErrors: [],
       aborted: false,
     });
+    recordPipelineOutcome(trace.span, result);
     await this.fireLifecycle(result, logger);
     return result;
   }
@@ -570,6 +680,11 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    * 1.8) and is evaluated before any hook. A cancellation surfacing through
    * the run (a woken retry delay or a cooperative run, section 1.3) records
    * the step as `'cancelled'` and stops the pipeline.
+   *
+   * The step's span (0.4.0 spec, section 1.8) brackets the whole of that —
+   * guard included, since a throwing guard is a step failure — and is closed
+   * in a `finally`, so no outcome can leak it. Every exit stamps the span from
+   * the very report it pushed, keeping the trace and the `Result` in step.
    */
   private async executeSequentialEntry(
     step: Step<TContext>,
@@ -577,138 +692,147 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     steps: StepReport[],
     completed: Completed<TContext>[],
     logger: Logger,
+    trace: TraceScope,
   ): Promise<EntryOutcome<TContext>> {
-    let shouldRun = true;
-    if (step.guard) {
-      const guardStart = performance.now();
-      try {
-        shouldRun = await step.guard(ctx);
-      } catch (raw) {
-        return {
-          status: 'failed',
-          failures: [
-            this.recordFailure(
-              ctx,
-              step,
-              raw,
-              performance.now() - guardStart,
-              steps,
-              logger,
-            ),
-          ],
-        };
-      }
-    }
-    if (!shouldRun) {
-      this.pushGuardSkip(step, steps, logger);
-      return { status: 'continue' };
-    }
-
-    await this.runHooks(
-      this.beforeHooks,
-      (hook) => hook(ctx, step),
-      'before',
-      step.name,
-      logger,
-    );
-
-    const start = performance.now();
-    // Resolved once per invocation, before the first attempt, and reused for
-    // every retry (0.4.0 spec, section 1.4). A throwing key function is a step
-    // failure like any other user-code throw — the run never happens, so the
-    // report carries neither an attempt count nor a key.
-    let idempotencyKey: string;
+    const span = trace.tracing.step(step.name, trace.span);
     try {
-      idempotencyKey = resolveIdempotencyKey(step, ctx);
-    } catch (raw) {
-      return {
-        status: 'failed',
-        failures: [
-          this.recordFailure(
+      recordStepStart(span, step.name);
+      // Published while the step runs so a pipeline-as-step nests its inner
+      // run under this span (section 1.8).
+      bindStepSpan(ctx, step.name, span);
+
+      let shouldRun = true;
+      if (step.guard) {
+        const guardStart = performance.now();
+        try {
+          shouldRun = await step.guard(ctx);
+        } catch (raw) {
+          const failure = this.recordFailure(
             ctx,
             step,
             raw,
-            performance.now() - start,
+            performance.now() - guardStart,
             steps,
             logger,
-          ),
-        ],
-      };
-    }
-    // Run with the step's retry policy (section 1.1); only `run` is retried.
-    const outcome = await this.executeStepRun(
-      step,
-      ctx,
-      ctx.signal,
-      'sequential',
-      idempotencyKey,
-    );
-    const durationMs = performance.now() - start;
-    if (!outcome.ok) {
-      if (outcome.cancelled) {
-        // The step never completed, so it is recorded 'cancelled' alongside
-        // the entries `execute` marks after it (section 1.3). A cancelled
-        // pipeline-as-step still surfaces its inner Result, showing the inner
-        // pipeline's own cancellation handling (0.3.0 spec, section 1.2.4 C).
-        const report: StepReport = {
-          name: step.name,
-          status: 'skipped',
-          durationMs: 0,
-          skipReason: 'cancelled',
-        };
-        attachInnerResult(ctx, report);
-        steps.push(report);
-        logger.debug('step skipped', {
-          stepName: step.name,
-          status: 'skipped',
-        });
-        return { status: 'cancelled', reason: ctx.signal.reason };
+          );
+          recordStepOutcome(span, failure.report);
+          return { status: 'failed', failures: [failure] };
+        }
       }
-      return {
-        status: 'failed',
-        failures: [
-          this.recordFailure(
-            ctx,
-            step,
-            outcome.error,
-            durationMs,
-            steps,
-            logger,
-            {
-              attempts: outcome.attempts,
-              timedOut: outcome.timedOut,
-              idempotencyKey,
-            },
-          ),
-        ],
+      if (!shouldRun) {
+        recordStepOutcome(span, this.pushGuardSkip(step, steps, logger));
+        return { status: 'continue' };
+      }
+
+      await this.runHooks(
+        this.beforeHooks,
+        (hook) => hook(ctx, step),
+        'before',
+        step.name,
+        logger,
+      );
+
+      const start = performance.now();
+      // Resolved once per invocation, before the first attempt, and reused for
+      // every retry (0.4.0 spec, section 1.4). A throwing key function is a step
+      // failure like any other user-code throw — the run never happens, so the
+      // report carries neither an attempt count nor a key.
+      let idempotencyKey: string;
+      try {
+        idempotencyKey = resolveIdempotencyKey(step, ctx);
+      } catch (raw) {
+        const failure = this.recordFailure(
+          ctx,
+          step,
+          raw,
+          performance.now() - start,
+          steps,
+          logger,
+        );
+        recordStepOutcome(span, failure.report);
+        return { status: 'failed', failures: [failure] };
+      }
+      recordStepKey(span, idempotencyKey);
+      // Run with the step's retry policy (section 1.1); only `run` is retried.
+      const outcome = await this.executeStepRun(
+        step,
+        ctx,
+        ctx.signal,
+        'sequential',
+        idempotencyKey,
+        { tracing: trace.tracing, span },
+      );
+      const durationMs = performance.now() - start;
+      if (!outcome.ok) {
+        if (outcome.cancelled) {
+          // The step never completed, so it is recorded 'cancelled' alongside
+          // the entries `execute` marks after it (section 1.3). A cancelled
+          // pipeline-as-step still surfaces its inner Result, showing the inner
+          // pipeline's own cancellation handling (0.3.0 spec, section 1.2.4 C).
+          const report: StepReport = {
+            name: step.name,
+            status: 'skipped',
+            durationMs: 0,
+            skipReason: 'cancelled',
+          };
+          attachInnerResult(ctx, report);
+          steps.push(report);
+          recordStepOutcome(span, report);
+          logger.debug('step skipped', {
+            stepName: step.name,
+            status: 'skipped',
+          });
+          return { status: 'cancelled', reason: ctx.signal.reason };
+        }
+        const failure = this.recordFailure(
+          ctx,
+          step,
+          outcome.error,
+          durationMs,
+          steps,
+          logger,
+          {
+            attempts: outcome.attempts,
+            timedOut: outcome.timedOut,
+            idempotencyKey,
+          },
+        );
+        recordStepOutcome(span, failure.report);
+        return { status: 'failed', failures: [failure] };
+      }
+
+      // Keep the report by reference so rollback can flip its status in place.
+      const report: StepReport = {
+        name: step.name,
+        status: 'completed',
+        durationMs,
+        attempts: outcome.attempts,
+        idempotencyKey,
       };
+      attachInnerResult(ctx, report);
+      steps.push(report);
+      completed.push({ step, report, idempotencyKey });
+      // Stamped now, while the report still says 'completed': a later rollback
+      // rewrites it in place, and that is what the `undo` span records.
+      recordStepOutcome(span, report);
+      logger.debug('step completed', {
+        stepName: step.name,
+        status: 'completed',
+        durationMs,
+      });
+
+      await this.runHooks(
+        this.afterHooks,
+        (hook) => hook(ctx, step, { status: 'completed', durationMs }),
+        'after',
+        step.name,
+        logger,
+      );
+      return { status: 'continue' };
+    } finally {
+      unbindStepSpan(ctx, step.name);
+      span.end();
     }
-
-    // Keep the report by reference so rollback can flip its status in place.
-    const report: StepReport = {
-      name: step.name,
-      status: 'completed',
-      durationMs,
-      attempts: outcome.attempts,
-      idempotencyKey,
-    };
-    attachInnerResult(ctx, report);
-    steps.push(report);
-    completed.push({ step, report, idempotencyKey });
-    logger.debug('step completed', {
-      stepName: step.name,
-      status: 'completed',
-      durationMs,
-    });
-
-    await this.runHooks(
-      this.afterHooks,
-      (hook) => hook(ctx, step, { status: 'completed', durationMs }),
-      'after',
-      step.name,
-      logger,
-    );
-    return { status: 'continue' };
   }
 
   /**
@@ -751,6 +875,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     steps: StepReport[],
     completed: Completed<TContext>[],
     logger: Logger,
+    trace: TraceScope,
   ): Promise<EntryOutcome<TContext>> {
     const pipelineSignal = ctx.signal;
 
@@ -765,22 +890,24 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         } catch (raw) {
           for (let i = 0; i < dispositions.length; i++) {
             if (dispositions[i] === 'skip') {
-              this.pushGuardSkip(groupSteps[i]!, steps, logger);
+              this.traceReportedStep(
+                trace,
+                this.pushGuardSkip(groupSteps[i]!, steps, logger),
+              );
             }
           }
-          return {
-            status: 'failed',
-            failures: [
-              this.recordFailure(
-                ctx,
-                step,
-                raw,
-                performance.now() - guardStart,
-                steps,
-                logger,
-              ),
-            ],
-          };
+          const failure = this.recordFailure(
+            ctx,
+            step,
+            raw,
+            performance.now() - guardStart,
+            steps,
+            logger,
+          );
+          // A group step is only given a span at dispatch, so the one step
+          // that got as far as a throwing guard needs its span emitted here.
+          this.traceReportedStep(trace, failure.report);
+          return { status: 'failed', failures: [failure] };
         }
       }
       dispositions.push(shouldRun ? 'run' : 'skip');
@@ -851,11 +978,19 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           idempotencyKey = resolveIdempotencyKey(step, ctx);
         } catch (raw) {
           const error = new StepError(step.name, { cause: raw });
+          const durationMs = performance.now() - keyStart;
           slots.set(index, {
             kind: 'failed',
             error,
             timedOut: false,
-            durationMs: performance.now() - keyStart,
+            durationMs,
+          });
+          // The step is never dispatched, so no task will open a span for it.
+          this.traceReportedStep(trace, {
+            name: step.name,
+            status: 'failed',
+            durationMs,
+            error,
           });
           logger.debug('step failed', {
             stepName: step.name,
@@ -876,6 +1011,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           slots,
           logger,
           idempotencyKey,
+          trace,
         );
         tasks.push(task);
         // Occupies a slot until it settles; the handler is registered here, so
@@ -898,7 +1034,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     for (let i = 0; i < groupSteps.length; i++) {
       const step = groupSteps[i]!;
       if (dispositions[i] === 'skip') {
-        this.pushGuardSkip(step, steps, logger);
+        this.traceReportedStep(trace, this.pushGuardSkip(step, steps, logger));
         continue;
       }
       // Every dispatched step settled into a slot before allSettled resolved.
@@ -940,7 +1076,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
         }
         attachInnerResult(ctx, report);
         steps.push(report);
-        failures.push({ error: slot.error, step });
+        failures.push({ error: slot.error, step, report });
       } else {
         // Ended by an abort — mid-flight, or before it was ever dispatched;
         // the skipReason records which level aborted.
@@ -949,12 +1085,16 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           name: step.name,
           status: 'skipped',
           durationMs: 0,
-          skipReason: pipelineSignal.aborted
-            ? 'cancelled'
-            : 'cancelled (parallel peer failed)',
+          skipReason: cancelledSkipReason(pipelineSignal),
         };
         attachInnerResult(ctx, report);
         steps.push(report);
+        // A dispatched step already closed its own span; one still queued when
+        // the group aborted never had one, so it gets a zero-length span here
+        // — keeping the trace one-to-one with `result.steps` (section 1.8).
+        if (slot === undefined) {
+          this.traceReportedStep(trace, report);
+        }
         logger.debug('step skipped', {
           stepName: step.name,
           status: 'skipped',
@@ -988,56 +1128,105 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     slots: Map<number, ParallelSlot>,
     logger: Logger,
     idempotencyKey: string,
+    trace: TraceScope,
   ): Promise<void> {
-    const start = performance.now();
-    const outcome = await this.executeStepRun(
-      step,
-      ctx,
-      groupSignal,
-      'parallel',
-      idempotencyKey,
-    );
-    const durationMs = performance.now() - start;
-    if (outcome.ok) {
+    // The span opens at dispatch and closes when this step settles, so a step
+    // waiting for a pool slot is not shown as running (0.4.0 spec, sections
+    // 1.5 and 1.8). Its outcome is stamped from the same facts phase 3 will
+    // put in the report, since the report is not assembled until the whole
+    // group has settled.
+    const span = trace.tracing.step(step.name, trace.span);
+    try {
+      recordStepStart(span, step.name);
+      recordStepKey(span, idempotencyKey);
+      bindStepSpan(ctx, step.name, span);
+      const start = performance.now();
+      const outcome = await this.executeStepRun(
+        step,
+        ctx,
+        groupSignal,
+        'parallel',
+        idempotencyKey,
+        { tracing: trace.tracing, span },
+      );
+      const durationMs = performance.now() - start;
+      if (outcome.ok) {
+        slots.set(index, {
+          kind: 'completed',
+          attempts: outcome.attempts,
+          durationMs,
+          idempotencyKey,
+        });
+        recordStepOutcome(span, {
+          status: 'completed',
+          durationMs,
+          attempts: outcome.attempts,
+        });
+        logger.debug('step completed', {
+          stepName: step.name,
+          status: 'completed',
+          durationMs,
+        });
+        await this.runHooks(
+          this.afterHooks,
+          (hook) => hook(ctx, step, { status: 'completed', durationMs }),
+          'after',
+          step.name,
+          logger,
+        );
+        return;
+      }
+      if (outcome.cancelled) {
+        slots.set(index, { kind: 'cancelled' });
+        recordStepOutcome(span, {
+          status: 'skipped',
+          durationMs: 0,
+          skipReason: cancelledSkipReason(ctx.signal),
+        });
+        return;
+      }
+      const error = new StepError(step.name, { cause: outcome.error });
       slots.set(index, {
-        kind: 'completed',
+        kind: 'failed',
+        error,
         attempts: outcome.attempts,
+        timedOut: outcome.timedOut,
         durationMs,
         idempotencyKey,
       });
-      logger.debug('step completed', {
-        stepName: step.name,
-        status: 'completed',
+      recordStepOutcome(span, {
+        status: 'failed',
         durationMs,
+        attempts: outcome.attempts,
+        timedOut: outcome.timedOut,
+        error,
       });
-      await this.runHooks(
-        this.afterHooks,
-        (hook) => hook(ctx, step, { status: 'completed', durationMs }),
-        'after',
-        step.name,
-        logger,
-      );
-      return;
+      logger.debug('step failed', {
+        stepName: step.name,
+        status: 'failed',
+        ...describeError(outcome.error),
+      });
+      group.abort(error);
+    } finally {
+      unbindStepSpan(ctx, step.name);
+      span.end();
     }
-    if (outcome.cancelled) {
-      slots.set(index, { kind: 'cancelled' });
-      return;
+  }
+
+  /**
+   * Emits the span for a step that produced a report but never had a span of
+   * its own: a guard skip, a step a cancelled run never reached, a group step
+   * whose guard threw, and a group step still queued when the pool aborted
+   * (0.4.0 spec, section 1.8). Every `StepReport` thus has exactly one span.
+   */
+  private traceReportedStep(trace: TraceScope, report: StepReport): void {
+    const span = trace.tracing.step(report.name, trace.span);
+    try {
+      recordStepStart(span, report.name);
+      recordStepOutcome(span, report);
+    } finally {
+      span.end();
     }
-    const error = new StepError(step.name, { cause: outcome.error });
-    slots.set(index, {
-      kind: 'failed',
-      error,
-      attempts: outcome.attempts,
-      timedOut: outcome.timedOut,
-      durationMs,
-      idempotencyKey,
-    });
-    logger.debug('step failed', {
-      stepName: step.name,
-      status: 'failed',
-      ...describeError(outcome.error),
-    });
-    group.abort(error);
   }
 
   /**
@@ -1130,18 +1319,25 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     baseSignal: AbortSignal,
     mode: RunMode,
     idempotencyKey: string,
+    trace: TraceScope,
   ): Promise<RunOutcome> {
     const retry = step.retry;
     const maxAttempts = retry?.attempts ?? 1;
     for (let attempt = 1; ; attempt++) {
-      const result = await this.runAttempt(step, ctx, baseSignal, {
-        stepName: step.name,
-        pipelineName: this.name,
-        executionId: ctx.executionId,
-        attempt,
-        maxAttempts,
-        idempotencyKey,
-      });
+      const result = await this.runTracedAttempt(
+        step,
+        ctx,
+        baseSignal,
+        {
+          stepName: step.name,
+          pipelineName: this.name,
+          executionId: ctx.executionId,
+          attempt,
+          maxAttempts,
+          idempotencyKey,
+        },
+        trace,
+      );
       if (result.ok) {
         return { ok: true, attempts: attempt };
       }
@@ -1184,6 +1380,35 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
           return { ok: false, cancelled: true };
         }
       }
+    }
+  }
+
+  /**
+   * Runs one attempt inside its own span (0.4.0 spec, section 1.8). The span
+   * exists only when the step actually retries — `Tracing.attempt` returns the
+   * inert span for `maxAttempts === 1`, where an attempt span would merely
+   * duplicate the step span — and it is closed in a `finally` so a rejection
+   * from anywhere below cannot leak it.
+   */
+  private async runTracedAttempt(
+    step: Step<TContext>,
+    ctx: TContext,
+    baseSignal: AbortSignal,
+    meta: Omit<StepMeta, 'signal'>,
+    trace: TraceScope,
+  ): Promise<AttemptResult> {
+    const span = trace.tracing.attempt(
+      step.name,
+      meta.attempt,
+      meta.maxAttempts,
+      trace.span,
+    );
+    try {
+      const result = await this.runAttempt(step, ctx, baseSignal, meta);
+      recordAttemptOutcome(span, result);
+      return result;
+    } finally {
+      span.end();
     }
   }
 
@@ -1293,25 +1518,30 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       status: 'failed',
       ...describeError(raw),
     });
-    return { error, step };
+    return { error, step, report };
   }
 
-  /** Pushes the `'skipped'` report for a step whose guard returned false. */
+  /**
+   * Pushes the `'skipped'` report for a step whose guard returned false, and
+   * returns it so the caller can stamp the step's span from it (section 1.8).
+   */
   private pushGuardSkip(
     step: Step<TContext>,
     steps: StepReport[],
     logger: Logger,
-  ): void {
-    steps.push({
+  ): StepReport {
+    const report: StepReport = {
       name: step.name,
       status: 'skipped',
       durationMs: 0,
       skipReason: 'guard returned false',
-    });
+    };
+    steps.push(report);
     logger.debug('step skipped', {
       stepName: step.name,
       status: 'skipped',
     });
+    return report;
   }
 
   /**
@@ -1326,17 +1556,20 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     fromEntry: number,
     steps: StepReport[],
     logger: Logger,
+    trace: TraceScope,
   ): void {
     for (let i = fromEntry; i < this.entries.length; i++) {
       const entry = this.entries[i]!;
       const group = entry.kind === 'sequential' ? [entry.step] : entry.steps;
       for (const step of group) {
-        steps.push({
+        const report: StepReport = {
           name: step.name,
           status: 'skipped',
           durationMs: 0,
           skipReason: 'cancelled',
-        });
+        };
+        steps.push(report);
+        this.traceReportedStep(trace, report);
         logger.debug('step skipped', {
           stepName: step.name,
           status: 'skipped',
@@ -1367,6 +1600,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     completed: Completed<TContext>[],
     ctx: TContext,
     logger: Logger,
+    trace: TraceScope,
   ): Promise<Error[]> {
     const rollbackErrors: Error[] = [];
     for (let i = completed.length - 1; i >= 0; i--) {
@@ -1374,31 +1608,42 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       if (!step.undo) {
         continue;
       }
+      // One compensation span per `undo` actually run, hung off the pipeline
+      // span rather than the step's — the step's span closed long ago, and a
+      // compensation belongs to the rollback phase (0.4.0 spec, section 1.8).
+      const span = trace.tracing.undo(step.name, trace.span);
       try {
-        await step.undo(ctx, {
-          stepName: step.name,
-          pipelineName: this.name,
-          executionId: ctx.executionId,
-          attempt: 1,
-          maxAttempts: 1,
-          idempotencyKey: `${idempotencyKey}:undo`,
-          signal: ctx.signal,
-        });
-        report.status = 'rolled-back';
-        logger.debug('step rolled back', {
-          stepName: step.name,
-          status: 'rolled-back',
-        });
-      } catch (raw) {
-        const error = raw instanceof Error ? raw : new Error(String(raw));
-        report.status = 'rollback-failed';
-        report.error = error;
-        rollbackErrors.push(error);
-        logger.error('step rollback failed', {
-          stepName: step.name,
-          status: 'rollback-failed',
-          ...describeError(raw),
-        });
+        recordUndoStart(span, step.name);
+        try {
+          await step.undo(ctx, {
+            stepName: step.name,
+            pipelineName: this.name,
+            executionId: ctx.executionId,
+            attempt: 1,
+            maxAttempts: 1,
+            idempotencyKey: `${idempotencyKey}:undo`,
+            signal: ctx.signal,
+          });
+          report.status = 'rolled-back';
+          recordUndoOutcome(span, report.status);
+          logger.debug('step rolled back', {
+            stepName: step.name,
+            status: 'rolled-back',
+          });
+        } catch (raw) {
+          const error = raw instanceof Error ? raw : new Error(String(raw));
+          report.status = 'rollback-failed';
+          report.error = error;
+          rollbackErrors.push(error);
+          recordUndoOutcome(span, report.status, error);
+          logger.error('step rollback failed', {
+            stepName: step.name,
+            status: 'rollback-failed',
+            ...describeError(raw),
+          });
+        }
+      } finally {
+        span.end();
       }
     }
     return rollbackErrors;
@@ -1609,14 +1854,44 @@ function computeRetryDelay(retry: RetryOptions, attemptIndex: number): number {
 }
 
 /**
- * Reduces a thrown value to a loggable `{ errorType, errorMessage }` — names and
- * types only, never raw payloads or context (section 1.10). Handles non-Error throws.
+ * Which level of cancellation ended a parallel step — the pipeline signal, or
+ * the group controller after a peer failed (0.3.0 spec, section 1.1.3; 0.4.0
+ * spec, section 1.5). Shared so a step's span and its report can never
+ * disagree about why it stopped.
  */
-function describeError(err: unknown): {
-  errorType: string;
-  errorMessage: string;
-} {
-  return err instanceof Error
-    ? { errorType: err.name, errorMessage: err.message }
-    : { errorType: typeof err, errorMessage: String(err) };
+function cancelledSkipReason(pipelineSignal: AbortSignal): string {
+  return pipelineSignal.aborted
+    ? 'cancelled'
+    : 'cancelled (parallel peer failed)';
+}
+
+/**
+ * Per-run tracing handles for pipeline-as-step nesting (0.4.0 spec, section
+ * 1.8), keyed by the outer run's context and then by wrapping-step name — the
+ * same shape and lifetime as {@link innerResults}, and for the same reasons:
+ * one context per `execute` keeps it re-entrancy-safe, and name-keying keeps
+ * concurrent wrapping steps inside a parallel group apart. Present only when
+ * the run was given a tracer. The stored span is the **user's own** span,
+ * because that is what their `tracer.startSpan(name, parent)` expects.
+ */
+const traceHandles = new WeakMap<
+  BaseContext,
+  { tracer: Tracer; spans: Map<string, TraceSpan> }
+>();
+
+/** Publishes a live step span so a nested pipeline can parent itself to it. */
+function bindStepSpan(
+  ctx: BaseContext,
+  stepName: string,
+  span: SafeSpan,
+): void {
+  const handle = traceHandles.get(ctx);
+  if (handle !== undefined && span.raw !== undefined) {
+    handle.spans.set(stepName, span.raw);
+  }
+}
+
+/** Withdraws it again the moment the step settles, so nothing outlives its span. */
+function unbindStepSpan(ctx: BaseContext, stepName: string): void {
+  traceHandles.get(ctx)?.spans.delete(stepName);
 }

@@ -37,6 +37,24 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
+    },
+    "./otel": {
+      "import": {
+        "types": "./dist/otel/index.d.ts",
+        "default": "./dist/otel/index.js"
+      },
+      "require": {
+        "types": "./dist/otel/index.d.cts",
+        "default": "./dist/otel/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "otel": [
+        "./dist/otel/index.d.ts"
+      ]
     }
   },
   "files": [
@@ -69,8 +87,18 @@
     "example:reliability": "tsx examples/reliability.ts",
     "example:composition": "tsx examples/composition.ts"
   },
+  "dependencies": {},
+  "peerDependencies": {
+    "@opentelemetry/api": ">=1.9.0 <2"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.3",
+    "@opentelemetry/api": "^1.9.1",
     "@types/node": "^22.19.19",
     "@vitest/coverage-v8": "^4.1.8",
     "eslint": "^10.4.1",

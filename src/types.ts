@@ -264,6 +264,41 @@ export interface SerializedResult {
 }
 
 /**
+ * One span in a trace (0.4.0 spec, section 1.8) — deliberately the smallest
+ * vendor-neutral surface penstock needs, so the core stays
+ * zero-runtime-dependency and never imports an OpenTelemetry package. The
+ * optional `penstock/otel` adapter (section 1.9) maps this onto a real OTel
+ * span; any other backend needs only these four methods.
+ *
+ * Every call penstock makes on a span is contained the way hooks are (section
+ * 1.8): a throw is caught, logged at `warn`, and never alters the run.
+ */
+export interface TraceSpan {
+  /**
+   * Records one attribute. penstock only ever writes `penstock.*` keys whose
+   * values are names, ids, statuses, counts, durations, and the idempotency
+   * key — never `ctx.input` or any context value (section 1.8, section 1.10).
+   */
+  setAttribute(key: string, value: string | number | boolean): void;
+  /** Records a thrown value on the span. May receive a non-`Error`. */
+  recordException(error: unknown): void;
+  /** Sets the span's terminal status; `message` accompanies `'error'`. */
+  setStatus(status: 'ok' | 'error', message?: string): void;
+  /** Ends the span. penstock guarantees exactly one call per started span. */
+  end(): void;
+}
+
+/**
+ * Starts spans for one execution (0.4.0 spec, section 1.8), supplied per run
+ * as `execute(input, { tracer })`. Omitting it emits no spans at all, and
+ * dry-run never emits spans whether or not a tracer is supplied.
+ */
+export interface Tracer {
+  /** Start a span. `parent` is the enclosing span, when there is one. */
+  startSpan(name: string, parent?: TraceSpan): TraceSpan;
+}
+
+/**
  * Options for a parallel group, passed as `addParallel(steps, options)` (0.4.0
  * spec, section 1.5).
  */
