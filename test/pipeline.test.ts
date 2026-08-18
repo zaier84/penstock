@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { BaseContext } from '../src/context';
-import { UsageError } from '../src/errors';
+import { StepError, UsageError } from '../src/errors';
 import type { Logger } from '../src/logger';
 import { noopLogger } from '../src/logger';
 import { Pipeline } from '../src/pipeline';
@@ -540,6 +540,80 @@ describe('Pipeline', () => {
 
       expect(result.ok).toBe(true);
       expect(onError).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('a thrown value that refuses string coercion (section 1.1)', () => {
+  it('still comes back as data rather than rejecting execute()', async () => {
+    // A null-prototype object has no toString. It reaches the step-failure
+    // log path, where coercing it used to throw and escape execute() —
+    // turning an operational failure into a rejected promise, which the
+    // failure model does not allow.
+    const result = await new Pipeline<OrderCtx>('hostile-throw')
+      .addStep(
+        new Step<OrderCtx>('offender', () => {
+          throw Object.create(null) as Error;
+        }),
+      )
+      .execute({ orderId: 'ord_1' });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBeInstanceOf(StepError);
+    expect((result.error as StepError).stepName).toBe('offender');
+    expect(result.steps[0]?.status).toBe('failed');
+  });
+
+  it('rolls back completed steps as it would for any other failure', async () => {
+    const undone: string[] = [];
+    const result = await new Pipeline<OrderCtx>('hostile-rollback')
+      .addStep(
+        new Step<OrderCtx>('reserve', {
+          run: (ctx) => {
+            ctx.token = 'tok_1';
+          },
+          undo: () => {
+            undone.push('reserve');
+          },
+        }),
+      )
+      .addStep(
+        new Step<OrderCtx>('offender', () => {
+          throw Object.create(null) as Error;
+        }),
+      )
+      .execute({ orderId: 'ord_1' });
+
+    expect(result.ok).toBe(false);
+    expect(undone).toEqual(['reserve']);
+    expect(result.steps.map((s) => s.status)).toEqual([
+      'rolled-back',
+      'failed',
+    ]);
+  });
+
+  it('logs the failure without leaking the thrown value', async () => {
+    const calls: LogCall[] = [];
+    const logger: Logger = {
+      debug: (msg, meta) => void calls.push({ level: 'debug', msg, meta }),
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+    };
+
+    await new Pipeline<OrderCtx>('hostile-log')
+      .addStep(
+        new Step<OrderCtx>('offender', () => {
+          throw Object.create(null) as Error;
+        }),
+      )
+      .execute({ orderId: 'ord_1' }, { logger });
+
+    const failed = calls.find((call) => call.msg === 'step failed');
+    expect(failed?.meta).toMatchObject({
+      stepName: 'offender',
+      errorType: 'object',
+      errorMessage: '[uncoercible value]',
     });
   });
 });

@@ -34,10 +34,23 @@ export function assertSafeName(
 }
 
 /**
+ * Stands in for a thrown value that refuses string coercion — a null-prototype
+ * object, or one whose `Symbol.toPrimitive` throws.
+ */
+const UNCOERCIBLE = '[uncoercible value]';
+
+/**
  * Reduces a thrown value to a loggable `{ errorType, errorMessage }` — names and
  * types only, never raw payloads or context (section 1.10). Handles non-Error throws.
  * Shared by every contained-callback log site: hooks, lifecycle callbacks, and
  * tracer calls (0.4.0 spec, section 1.8).
+ *
+ * The coercion is guarded because `String(value)` is not total: a step is free
+ * to `throw Object.create(null)`, which has no `toString`, and coercing it
+ * throws a `TypeError`. Since this function is on the step-failure logging
+ * path, letting that escape would make `execute()` **reject** rather than
+ * resolve `ok: false`, breaking the failure model that says operational
+ * failures come back as data (section 1.1).
  */
 export function describeError(err: unknown): {
   errorType: string;
@@ -45,5 +58,14 @@ export function describeError(err: unknown): {
 } {
   return err instanceof Error
     ? { errorType: err.name, errorMessage: err.message }
-    : { errorType: typeof err, errorMessage: String(err) };
+    : { errorType: typeof err, errorMessage: coerce(err) };
+}
+
+/** `String(value)`, degrading a value that refuses coercion to a fixed label. */
+function coerce(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return UNCOERCIBLE;
+  }
 }
