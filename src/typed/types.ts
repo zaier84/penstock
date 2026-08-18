@@ -6,12 +6,20 @@ import type {
   BeforeHook,
   ErrorHook,
   LifecycleCallback,
+  ParallelOptions,
   Result,
   RetryOptions,
   StepMeta,
 } from '../types';
+import type { ProducesOf, RequiresOf, StepDef } from './define';
 
-/* eslint-disable @typescript-eslint/no-empty-object-type --
+/* eslint-disable @typescript-eslint/no-empty-object-type, @typescript-eslint/no-explicit-any --
+ * `any` appears only as an inference placeholder in constraint positions —
+ * `StepDef<TInput, any, any>`, `TypedPipeline<any, any, any>` — where the real
+ * types are recovered immediately by `RequiresOf`, `ProducesOf`, `InnerInputOf`
+ * and `InnerCtxOf`. `unknown` cannot stand in: it fails the `extends object`
+ * constraints these positions carry.
+ *
  * `{}` is load-bearing throughout this file and cannot be swapped for
  * `object`, `Record<string, unknown>`, or `unknown`. It is the identity
  * element of `Merge`: the state of a pipeline that has produced nothing yet,
@@ -141,6 +149,101 @@ export interface TypedPipeline<
   >;
 
   /**
+   * Appends a reusable step definition created by `defineStep` (0.5.0 spec,
+   * section 2.5). Its contribution becomes the new `TLast`, exactly as if the
+   * step had been declared inline.
+   *
+   * A definition may declare a **required prior state**, and the conditional in
+   * the parameter type enforces it: if the state accumulated so far does not
+   * satisfy `RequiresOf<TDef>`, the parameter resolves to `never` and the call
+   * fails to compile. Composing steps in the wrong order is therefore a type
+   * error rather than a runtime `undefined`.
+   */
+  use<TDef extends StepDef<TInput, any, any>>(
+    def: Merge<TPrev, TLast> extends RequiresOf<TDef> ? TDef : never,
+  ): TypedPipeline<TInput, Merge<TPrev, TLast>, ProducesOf<TDef>>;
+
+  /**
+   * Appends a parallel group (`PENSTOCK_0.3.0_SPEC.md` section 1.1). Every
+   * definition's contribution is intersected into the new `TLast`, so a later
+   * step sees all of them.
+   *
+   * It takes an **array**, not an object, and deliberately (0.5.0 spec, section
+   * 1.2): declaration order defines rollback order and which failure becomes
+   * `result.error`, and JavaScript reorders integer-like keys in objects — so
+   * an object form would silently reorder a group containing a step named
+   * `"1"`. Modifiers belong on the individual `StepDef`s, not on the group.
+   */
+  parallel<TDefs extends readonly StepDef<TInput, any, any>[]>(
+    defs: TDefs,
+    options?: ParallelOptions,
+  ): TypedPipeline<
+    TInput,
+    Merge<TPrev, TLast>,
+    Simplify<UnionToIntersection<ProducesOf<TDefs[number]>>> extends infer O
+      ? O extends object
+        ? O
+        : {}
+      : {}
+  >;
+
+  /**
+   * Nests another pipeline as a single step (`PENSTOCK_0.3.0_SPEC.md` section
+   * 1.2). `mapInput` derives the inner pipeline's input from the outer context;
+   * `mapResult` turns the inner `Result` into a contribution, which is merged
+   * on the outer context exactly like a step's return.
+   *
+   * That is the one place this differs from the class API's `asStep`, whose
+   * `mapResult` returns `void` and writes onto the outer context by hand. Here
+   * it **returns** the contribution, so the accumulated type follows it.
+   * Omitting `mapResult` contributes nothing while still running the inner
+   * pipeline for its effects.
+   *
+   * The inner pipeline may be another typed pipeline or a class-API
+   * {@link Pipeline}; the overloads accept either.
+   */
+  compose<
+    TInner extends TypedPipeline<any, any, any>,
+    TOpts extends TypedComposeOptions<
+      TypedCtx<TInput, Merge<TPrev, TLast>>,
+      InnerInputOf<TInner>,
+      InnerCtxOf<TInner>
+    >,
+  >(
+    name: string,
+    inner: TInner,
+    options: TOpts,
+  ): TypedPipeline<
+    TInput,
+    Merge<TPrev, TLast>,
+    ComposeContribution<TOpts> extends infer O
+      ? O extends object
+        ? O
+        : {}
+      : {}
+  >;
+  compose<
+    TInnerCtx extends BaseContext,
+    TOpts extends TypedComposeOptions<
+      TypedCtx<TInput, Merge<TPrev, TLast>>,
+      TInnerCtx['input'],
+      TInnerCtx
+    >,
+  >(
+    name: string,
+    inner: Pipeline<TInnerCtx>,
+    options: TOpts,
+  ): TypedPipeline<
+    TInput,
+    Merge<TPrev, TLast>,
+    ComposeContribution<TOpts> extends infer O
+      ? O extends object
+        ? O
+        : {}
+      : {}
+  >;
+
+  /**
    * Guards the most recent step: a falsy result skips it. Its contribution
    * therefore becomes `Partial<TLast>` — the keys may or may not exist by the
    * time later steps run, and the types say so instead of pretending otherwise.
@@ -248,4 +351,66 @@ export interface TypedPipeline<
   toPipeline(): Pipeline<TypedCtx<TInput, Merge<TPrev, TLast>>>;
 }
 
-/* eslint-enable @typescript-eslint/no-empty-object-type */
+/**
+ * The inner pipeline's `execute()` input, recovered from a
+ * {@link TypedPipeline}, so `compose`'s `mapInput` is checked against the
+ * pipeline it actually feeds.
+ */
+export type InnerInputOf<T> =
+  T extends TypedPipeline<infer TInput, any, any> ? TInput : never;
+
+/**
+ * The inner pipeline's fully accumulated context, recovered from a
+ * {@link TypedPipeline}. It is what `compose`'s `mapResult` sees as
+ * `inner.context`, so the inner chain's own accumulation survives the nesting
+ * instead of collapsing to a bare {@link BaseContext}.
+ */
+export type InnerCtxOf<T> =
+  T extends TypedPipeline<infer TInput, infer TPrev, infer TLast>
+    ? TypedCtx<TInput, Merge<TPrev, TLast>>
+    : never;
+
+/**
+ * Options for {@link TypedPipeline.compose} (0.5.0 spec, section 2.4).
+ *
+ * Deliberately **not** `AsStepOptions`. There, `mapResult` returns `void` and
+ * writes onto the outer context by hand; here it **returns** a contribution,
+ * which the builder merges through the same single path a step's return takes
+ * — which is what lets the accumulated type follow it.
+ *
+ * `when` and `undo` are absent on purpose: they are builder modifiers, chained
+ * after `.compose(...)` exactly as they are after `.step(...)`.
+ */
+export interface TypedComposeOptions<
+  TOuterCtx,
+  TInnerInput,
+  TInnerCtx extends BaseContext,
+> {
+  /** Derives the inner pipeline's input from the outer context. Required. */
+  mapInput: (ctx: TOuterCtx) => TInnerInput;
+  /**
+   * Turns the inner `Result` into a contribution for the outer context, called
+   * only when the inner pipeline succeeded. May be async — its resolved value
+   * is what contributes.
+   */
+  mapResult?: (inner: Result<TInnerCtx>, ctx: TOuterCtx) => StepReturn;
+}
+
+/**
+ * What a `compose` call contributes: whatever its `mapResult` resolves to, or
+ * nothing at all when there is no `mapResult`.
+ *
+ * This has to be a **conditional on the options type**. The obvious
+ * `StateOf<Awaited<ReturnType<NonNullable<TOpts['mapResult']>>>>` fails to
+ * compile once `mapResult` is omitted: the property is then `undefined`,
+ * `NonNullable` of it is `never`, and `ReturnType<never>` is an error. Matching
+ * the property out of the object type instead simply misses, yielding the
+ * empty state.
+ */
+export type ComposeContribution<TOpts> = TOpts extends {
+  mapResult: (...args: never[]) => infer TReturn;
+}
+  ? StateOf<Awaited<TReturn>>
+  : {};
+
+/* eslint-enable @typescript-eslint/no-empty-object-type, @typescript-eslint/no-explicit-any */

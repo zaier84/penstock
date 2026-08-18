@@ -17,8 +17,20 @@ import type {
   Tracer,
   UndoFn,
 } from '../src/index';
-import { Pipeline, pipeline, serializeResult, Step } from '../src/index';
-import type { Merge, StateOf, TypedCtx } from '../src/index';
+import {
+  defineStep,
+  Pipeline,
+  pipeline,
+  serializeResult,
+  Step,
+} from '../src/index';
+import type {
+  Merge,
+  ProducesOf,
+  RequiresOf,
+  StateOf,
+  TypedCtx,
+} from '../src/index';
 import { otelTracer } from '../src/otel/index';
 import type { OtelTracerOptions } from '../src/otel/index';
 
@@ -453,5 +465,168 @@ describe('typed builder inference (0.5.0 sections 2.3 and 2.4)', () => {
       .step('a', () => ({ z: 1 }))
       // @ts-expect-error — timeout is a number of milliseconds.
       .timeout('1000');
+  });
+});
+
+describe('defineStep inference (0.5.0 section 2.5)', () => {
+  const forCheckout = defineStep<CheckoutInput>();
+
+  it('infers what a definition produces and requires', () => {
+    const fetchUser = forCheckout('fetch-user', async () => ({
+      user: { id: 'u1' },
+    }));
+
+    // A definition carries its name and its constructed Step at runtime, and
+    // its requires/produces only in the type system.
+    expectTypeOf(fetchUser.name).toEqualTypeOf<string>();
+    expectTypeOf<ProducesOf<typeof fetchUser>>().toEqualTypeOf<{
+      user: { id: string };
+    }>();
+    // No declared requirement, so it is the identity element of Merge.
+    expectTypeOf<
+      Merge<{ a: string }, RequiresOf<typeof fetchUser>>
+    >().toEqualTypeOf<{ a: string }>();
+  });
+
+  it('types the run context by the declared requirement', () => {
+    defineStep<CheckoutInput, { token: string }>()('call-api', (ctx) => {
+      expectTypeOf(ctx.input).toEqualTypeOf<CheckoutInput>();
+      expectTypeOf(ctx.token).toEqualTypeOf<string>();
+      return { profile: 'p' };
+    });
+  });
+
+  it('accepts a definition whose requirement an earlier step satisfies', () => {
+    const needsToken = defineStep<CheckoutInput, { token: string }>()(
+      'call-api',
+      (ctx) => ({ profile: 'p:' + ctx.token }),
+    );
+
+    pipeline<CheckoutInput>('satisfied')
+      .step('auth', () => ({ token: 'tok' }))
+      .use(needsToken)
+      .step('after', (ctx) => {
+        expectTypeOf(ctx.token).toEqualTypeOf<string>();
+        expectTypeOf(ctx.profile).toEqualTypeOf<string>();
+      });
+  });
+
+  it('rejects a definition used before its requirement is produced', () => {
+    const needsToken = defineStep<CheckoutInput, { token: string }>()(
+      'call-api',
+      (ctx) => ({ profile: 'p:' + ctx.token }),
+    );
+
+    pipeline<CheckoutInput>('unsatisfied')
+      // @ts-expect-error — token is produced by no earlier step.
+      .use(needsToken);
+
+    pipeline<CheckoutInput>('wrong-type')
+      .step('auth', () => ({ token: 42 }))
+      // @ts-expect-error — token is a number here, not the string required.
+      .use(needsToken);
+  });
+
+  it('makes a guarded definition contribution optional', () => {
+    pipeline<CheckoutInput>('guarded-def')
+      .use(forCheckout('maybe', () => ({ flag: true })).when(() => false))
+      .step('after', (ctx) => {
+        expectTypeOf(ctx.flag).toEqualTypeOf<boolean | undefined>();
+      });
+  });
+
+  it('intersects the contributions of a parallel group', () => {
+    pipeline<CheckoutInput>('fanout')
+      .parallel(
+        [
+          forCheckout('a', () => ({ user: 'u' })),
+          forCheckout('b', async () => ({ price: 1 })),
+        ],
+        { concurrency: 2 },
+      )
+      .step('after', (ctx) => {
+        expectTypeOf(ctx.user).toEqualTypeOf<string>();
+        expectTypeOf(ctx.price).toEqualTypeOf<number>();
+      });
+  });
+});
+
+describe('typed composition inference (0.5.0 section 2.4)', () => {
+  interface SkuInput {
+    sku: string;
+  }
+  const inner = pipeline<SkuInput>('inner').step('lookup', (ctx) => ({
+    stock: 7,
+    sku: ctx.input.sku,
+  }));
+
+  it('types compose by what its mapResult returns', () => {
+    pipeline<CheckoutInput>('outer')
+      .compose('inventory', inner, {
+        mapInput: (ctx) => {
+          expectTypeOf(ctx.input).toEqualTypeOf<CheckoutInput>();
+          return { sku: 'sku_1' };
+        },
+        mapResult: (result, ctx) => {
+          // The inner Result is typed by the inner pipeline's accumulated state.
+          expectTypeOf(result.context.stock).toEqualTypeOf<number>();
+          expectTypeOf(result.context.sku).toEqualTypeOf<string>();
+          expectTypeOf(ctx.input).toEqualTypeOf<CheckoutInput>();
+          return { stock: result.context.stock };
+        },
+      })
+      .step('after', (ctx) => {
+        expectTypeOf(ctx.stock).toEqualTypeOf<number>();
+      });
+  });
+
+  it('follows an async mapResult through Awaited', () => {
+    pipeline<CheckoutInput>('outer-async')
+      .compose('inventory', inner, {
+        mapInput: () => ({ sku: 'sku_1' }),
+        mapResult: async (result) => ({ doubled: result.context.stock * 2 }),
+      })
+      .step('after', (ctx) => {
+        expectTypeOf(ctx.doubled).toEqualTypeOf<number>();
+      });
+  });
+
+  it('contributes nothing when compose has no mapResult', () => {
+    pipeline<CheckoutInput>('outer-none')
+      .step('a', () => ({ a: 1 }))
+      .compose('inventory', inner, { mapInput: () => ({ sku: 'sku_1' }) })
+      .step('after', (ctx) => {
+        expectTypeOf(ctx.a).toEqualTypeOf<number>();
+        // @ts-expect-error — no mapResult, so the compose contributed nothing.
+        void ctx.stock;
+      });
+  });
+
+  it('rejects a mapInput returning the wrong inner input', () => {
+    pipeline<CheckoutInput>('outer-bad')
+      // @ts-expect-error — the inner pipeline takes { sku: string }, so no
+      // overload matches; the error lands on the call, not the property.
+      .compose('inventory', inner, {
+        mapInput: () => ({ wrong: true }),
+      });
+  });
+
+  it('accepts a class-API Pipeline as the inner pipeline', () => {
+    type InvCtx = BaseContext<SkuInput> & { stock?: number };
+    const legacy = new Pipeline<InvCtx>('legacy');
+
+    pipeline<CheckoutInput>('outer-legacy')
+      .compose('legacy', legacy, {
+        mapInput: () => ({ sku: 'sku_1' }),
+        mapResult: (result) => {
+          expectTypeOf(result.context.stock).toEqualTypeOf<
+            number | undefined
+          >();
+          return { stock: result.context.stock ?? 0 };
+        },
+      })
+      .step('after', (ctx) => {
+        expectTypeOf(ctx.stock).toEqualTypeOf<number>();
+      });
   });
 });

@@ -4,49 +4,47 @@ import { UsageError } from '../errors';
 import { assertSafeName } from '../internal';
 import { Pipeline } from '../pipeline';
 import type { ExecuteOptions } from '../pipeline';
-import { Step } from '../step';
+import type { Step } from '../step';
 import type {
   AfterHook,
   BeforeHook,
   ErrorHook,
   LifecycleCallback,
+  ParallelOptions,
   Result,
   RetryOptions,
-  RunFn,
-  StepMeta,
-  StepOptions,
 } from '../types';
-import { mergeContribution } from './merge';
+import type {
+  ErasedCtx,
+  ErasedGuard,
+  ErasedKey,
+  ErasedRun,
+  ErasedUndo,
+  StepSpec,
+} from './define';
+import { specOf, toStep } from './define';
 import type { StepReturn, TypedPipeline } from './types';
 
 /**
- * The context type the builder uses internally. Its public generics exist to
- * track accumulated state for the *caller*; the runtime work is identical
- * whatever they are, so everything below is written against the erased context
- * and reunited with the tracked types by the single cast in {@link pipeline}.
+ * One position in the pipeline being described. Sequential entries stay
+ * modifiable — `.undo()` and friends attach to the most recent one — while a
+ * parallel group is closed the moment it is declared, its members having been
+ * modified on their own `StepDef`s beforehand.
  */
-type ErasedCtx = BaseContext;
+type Entry =
+  | { kind: 'sequential'; spec: StepSpec }
+  | { kind: 'parallel'; steps: Step<ErasedCtx>[]; concurrency?: number };
 
-type ErasedRun = (ctx: ErasedCtx, meta: StepMeta) => StepReturn;
-type ErasedGuard = (ctx: ErasedCtx) => boolean | Promise<boolean>;
-type ErasedUndo = (ctx: ErasedCtx, meta: StepMeta) => void | Promise<void>;
-type ErasedKey = string | ((ctx: ErasedCtx) => string);
-
-/**
- * One step as declared so far. The builder cannot construct its `Step` eagerly:
- * a `Step` is immutable, and `.undo()` / `.retry()` and friends arrive *after*
- * the `.step()` call they modify. So each step is held as a mutable record and
- * turned into a real `Step` only when the pipeline is built.
- */
-interface StepSpec {
-  readonly name: string;
-  readonly run: ErasedRun;
-  when?: ErasedGuard;
-  undo?: ErasedUndo;
-  retry?: RetryOptions;
-  timeout?: number;
-  idempotencyKey?: ErasedKey;
+/** The runtime shape of the options {@link TypedPipelineBuilder.compose} takes. */
+interface ComposeOptions {
+  mapInput: (ctx: ErasedCtx) => unknown;
+  mapResult?: (inner: Result<ErasedCtx>, ctx: ErasedCtx) => StepReturn;
 }
+
+/** Either kind of inner pipeline `compose` accepts. */
+type ComposeTarget =
+  | Pipeline<ErasedCtx>
+  | { toPipeline(): Pipeline<ErasedCtx> };
 
 /**
  * The runtime behind {@link TypedPipeline}. It is a **facade**: it records what
@@ -61,11 +59,10 @@ interface StepSpec {
  */
 class TypedPipelineBuilder {
   private readonly pipelineName: string;
-  private readonly specs: StepSpec[] = [];
-  // Step-name dedup, so a duplicate fails at the offending `.step()` call
-  // rather than when the pipeline is eventually built. A Set, never a
-  // user-keyed plain object (section 1.10). `Pipeline.addStep` re-checks
-  // authoritatively at build time.
+  private readonly entries: Entry[] = [];
+  // Step-name dedup, so a duplicate fails at the offending call rather than
+  // when the pipeline is eventually built. A Set, never a user-keyed plain
+  // object (section 1.10). `Pipeline` re-checks authoritatively at build time.
   private readonly names = new Set<string>();
   private readonly engines: Engine[] = [];
   private readonly beforeHooks: BeforeHook<ErasedCtx>[] = [];
@@ -76,8 +73,8 @@ class TypedPipelineBuilder {
   private readonly cancelCallbacks: LifecycleCallback<ErasedCtx>[] = [];
   private readonly settledCallbacks: LifecycleCallback<ErasedCtx>[] = [];
   // Memoised build, discarded whenever anything is declared. Building is pure
-  // and cheap, so this is only to keep repeated `execute` calls from
-  // reconstructing the same steps.
+  // and cheap, so this only keeps repeated `execute` calls from reconstructing
+  // the same steps.
   private built: Pipeline<ErasedCtx> | undefined;
 
   constructor(name: string) {
@@ -88,16 +85,86 @@ class TypedPipelineBuilder {
   }
 
   step(name: string, run: ErasedRun): this {
-    assertSafeName('Step', name);
-    if (this.names.has(name)) {
-      throw new UsageError(
-        `Pipeline "${this.pipelineName}" already has a step named "${name}"`,
-      );
+    return this.pushSpec({ name, run });
+  }
+
+  use(def: object): this {
+    // The spec is copied, so a builder modifier applied after `.use()` cannot
+    // reach back and mutate a definition that may be shared with another
+    // pipeline.
+    return this.pushSpec({ ...specOf(def, 'use') });
+  }
+
+  parallel(defs: readonly object[], options?: ParallelOptions): this {
+    const steps: Step<ErasedCtx>[] = [];
+    const names: string[] = [];
+    for (const def of defs) {
+      names.push(specOf(def, 'parallel').name);
+      steps.push((def as { step: Step<ErasedCtx> }).step);
     }
-    this.names.add(name);
-    this.specs.push({ name, run });
+    // The group's own rules — at least two steps, real Step instances, an
+    // integer concurrency, no duplicate names within the group — are checked by
+    // running the authority itself against a scratch pipeline. That keeps the
+    // errors identical to the class API's and makes it impossible for the two
+    // to drift, at the cost of one discarded object per declaration.
+    new Pipeline<ErasedCtx>(this.pipelineName).addParallel(steps, options);
+    // Uniqueness across the *whole* pipeline is the one thing the scratch
+    // pipeline cannot know about. Checked before anything is claimed, so a
+    // rejected group leaves the builder untouched.
+    for (const name of names) {
+      this.assertNameFree(name);
+    }
+    for (const name of names) {
+      this.names.add(name);
+    }
+    this.entries.push(
+      options?.concurrency === undefined
+        ? { kind: 'parallel', steps }
+        : { kind: 'parallel', steps, concurrency: options.concurrency },
+    );
     this.built = undefined;
     return this;
+  }
+
+  compose(name: string, inner: ComposeTarget, options: ComposeOptions): this {
+    const target = inner instanceof Pipeline ? inner : inner.toPipeline();
+    const mapResult = options.mapResult;
+    if (mapResult === undefined) {
+      // Nothing to contribute, so the inner run needs no result captured.
+      const plain = target.asStep<ErasedCtx>(name, {
+        mapInput: options.mapInput,
+      });
+      return this.pushSpec({
+        name,
+        run: async (ctx, meta) => {
+          await plain.run(ctx, meta);
+        },
+      });
+    }
+    // `asStep` calls its own mapResult synchronously and never awaits it, so
+    // merging inside it would silently drop an async mapResult's contribution.
+    // It is used only to capture the inner Result; the typed mapResult is then
+    // awaited below and its value RETURNED, so the ordinary merge wrapper
+    // handles it — one merge path, and the reserved-key guards cover compose
+    // for free. Keyed by the outer context, so concurrent runs never share.
+    const captured = new WeakMap<BaseContext, Result<ErasedCtx>>();
+    const capturing = target.asStep<ErasedCtx>(name, {
+      mapInput: options.mapInput,
+      mapResult: (innerResult, outerCtx) => {
+        captured.set(outerCtx, innerResult);
+      },
+    });
+    return this.pushSpec({
+      name,
+      run: async (ctx, meta) => {
+        // Throws on inner failure, so reaching the next line means the inner
+        // pipeline succeeded and its mapResult above has run.
+        await capturing.run(ctx, meta);
+        const innerResult = captured.get(ctx)!;
+        captured.delete(ctx);
+        return await mapResult(innerResult, ctx);
+      },
+    });
   }
 
   when(fn: ErasedGuard): this {
@@ -185,25 +252,52 @@ class TypedPipelineBuilder {
     return this.built;
   }
 
+  /** Registers a sequential step, claiming its name first. */
+  private pushSpec(spec: StepSpec): this {
+    assertSafeName('Step', spec.name);
+    this.assertNameFree(spec.name);
+    this.names.add(spec.name);
+    this.entries.push({ kind: 'sequential', spec });
+    this.built = undefined;
+    return this;
+  }
+
+  private assertNameFree(name: string): void {
+    if (this.names.has(name)) {
+      throw new UsageError(
+        `Pipeline "${this.pipelineName}" already has a step named "${name}"`,
+      );
+    }
+  }
+
   /**
    * Returns the step a modifier applies to — always the most recently declared
-   * one — and invalidates the memoised build. A modifier with no step to attach
-   * to is misuse and fails fast (0.5.0 spec, section 3.5).
+   * one — and invalidates the memoised build. Applying the same modifier twice
+   * **replaces** the earlier value rather than combining or throwing, mirroring
+   * `Step.prototype.when`.
    *
-   * Applying the same modifier twice **replaces** the earlier value rather than
-   * combining or throwing, mirroring `Step.prototype.when`.
+   * Two shapes are misuse and fail fast (0.5.0 spec, section 3.5): a modifier
+   * with no step to attach to, and a modifier aimed at a parallel group, whose
+   * members are configured on their own definitions instead.
    */
   private modify(modifier: string): StepSpec {
-    const spec = this.specs[this.specs.length - 1];
-    if (spec === undefined) {
+    const entry = this.entries[this.entries.length - 1];
+    if (entry === undefined) {
       throw new UsageError(
         `Pipeline "${this.pipelineName}" .${modifier}() must follow a step. ` +
           `Add a step with .step(name, run) first; modifiers apply to the most ` +
           `recent step.`,
       );
     }
+    if (entry.kind !== 'sequential') {
+      throw new UsageError(
+        `Pipeline "${this.pipelineName}" .${modifier}() cannot modify a ` +
+          `parallel group, because a modifier targets a single step. Apply it ` +
+          `to the StepDef instead, before passing it to .parallel().`,
+      );
+    }
     this.built = undefined;
-    return spec;
+    return entry.spec;
   }
 
   /**
@@ -217,8 +311,14 @@ class TypedPipelineBuilder {
     for (const engine of this.engines) {
       pipeline.useEngine(engine);
     }
-    for (const spec of this.specs) {
-      pipeline.addStep(toStep(spec));
+    for (const entry of this.entries) {
+      if (entry.kind === 'sequential') {
+        pipeline.addStep(toStep(entry.spec));
+      } else if (entry.concurrency === undefined) {
+        pipeline.addParallel(entry.steps);
+      } else {
+        pipeline.addParallel(entry.steps, { concurrency: entry.concurrency });
+      }
     }
     for (const hook of this.beforeHooks) {
       pipeline.before(hook);
@@ -243,58 +343,6 @@ class TypedPipelineBuilder {
     }
     return pipeline;
   }
-}
-
-/**
- * Turns a declared step into a real {@link Step}, wrapping its `run` so the
- * returned contribution reaches the context. Optional config is left truly
- * absent when unset — `Step` and the executor both branch on presence, so an
- * explicit `undefined` would not mean the same thing.
- */
-function toStep(spec: StepSpec): Step<ErasedCtx> {
-  const options: StepOptions<ErasedCtx> = { run: wrapRun(spec) };
-  if (spec.when !== undefined) {
-    options.when = spec.when;
-  }
-  if (spec.undo !== undefined) {
-    options.undo = spec.undo;
-  }
-  if (spec.retry !== undefined) {
-    options.retry = spec.retry;
-  }
-  if (spec.timeout !== undefined) {
-    options.timeout = spec.timeout;
-  }
-  if (spec.idempotencyKey !== undefined) {
-    options.idempotencyKey = spec.idempotencyKey;
-  }
-  return new Step<ErasedCtx>(spec.name, options);
-}
-
-/**
- * The merge wrapper — the one piece of new runtime behaviour in the release
- * (0.5.0 spec, section 3.1). It runs the user's function and merges whatever it
- * returned onto the context.
- *
- * A run that throws never reaches the merge, so a failed attempt contributes
- * nothing and a step that succeeds on its third try contributes exactly once
- * (section 3.2).
- *
- * The `meta.signal.aborted` check closes a real gap (section 3.3). `runAttempt`
- * races a timed-out run against its timeout and moves on, but the abandoned
- * promise keeps going and eventually resolves — with the class API it can still
- * mutate the context long after the pipeline has finished. Returning early here
- * means a run whose own signal has aborted, by timeout or by cancellation,
- * cannot write.
- */
-function wrapRun(spec: StepSpec): RunFn<ErasedCtx> {
-  return async (ctx, meta) => {
-    const contribution = await spec.run(ctx, meta);
-    if (meta.signal.aborted) {
-      return;
-    }
-    mergeContribution(ctx, contribution, spec.name);
-  };
 }
 
 /* eslint-disable @typescript-eslint/no-empty-object-type --

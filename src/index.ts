@@ -2,7 +2,7 @@
 
 export { Step } from './step';
 export { Pipeline } from './pipeline';
-export { pipeline } from './typed/index';
+export { defineStep, pipeline } from './typed/index';
 export type { ExecuteOptions } from './pipeline';
 export { serializeResult } from './serialize';
 export { Engine, registerEngine, clearEngines } from './engine';
@@ -38,10 +38,17 @@ export type {
   UndoFn,
 } from './types';
 export type {
+  ComposeContribution,
+  InnerCtxOf,
+  InnerInputOf,
   Merge,
+  ProducesOf,
+  RequiresOf,
   Simplify,
   StateOf,
+  StepDef,
   StepReturn,
+  TypedComposeOptions,
   TypedCtx,
   TypedPipeline,
   UnionToIntersection,
