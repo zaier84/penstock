@@ -237,11 +237,15 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    */
   addStep(step: Step<TContext>): this {
     if (!(step instanceof Step)) {
-      throw new UsageError('Pipeline.addStep expects a Step instance');
+      throw new UsageError(
+        `Pipeline "${this.name}" addStep expected a Step instance but received a ` +
+          `${typeof step}. Pass a Step, e.g. new Step("validate-order", run).`,
+      );
     }
     if (this.stepNames.has(step.name)) {
       throw new UsageError(
-        `Pipeline "${this.name}" already has a step named "${step.name}"`,
+        `Pipeline "${this.name}" already has a step named "${step.name}". Step ` +
+          `names must be unique across the whole pipeline, so rename this one or the earlier one.`,
       );
     }
     this.stepNames.add(step.name);
@@ -264,7 +268,8 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   addParallel(steps: Step<TContext>[], options?: ParallelOptions): this {
     if (!Array.isArray(steps) || steps.length < 2) {
       throw new UsageError(
-        `Pipeline "${this.name}" addParallel requires at least 2 steps`,
+        `Pipeline "${this.name}" addParallel expected an array of at least 2 steps. ` +
+          `Use addStep for a single step, or pass two or more to run them concurrently.`,
       );
     }
     // A bad limit is misuse, so it fails fast and synchronously like every
@@ -276,17 +281,22 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
       (!Number.isInteger(concurrency) || concurrency < 1)
     ) {
       throw new UsageError(
-        `Pipeline "${this.name}" addParallel concurrency must be an integer greater than or equal to 1`,
+        `Pipeline "${this.name}" addParallel expected concurrency to be an integer ` +
+          `of at least 1. Omit it to run every step in the group at once.`,
       );
     }
     const incoming = new Set<string>();
     for (const step of steps) {
       if (!(step instanceof Step)) {
-        throw new UsageError('Pipeline.addParallel expects Step instances');
+        throw new UsageError(
+          `Pipeline "${this.name}" addParallel expected Step instances but received ` +
+            `a ${typeof step}. Pass Steps, e.g. new Step("fetch-pricing", run).`,
+        );
       }
       if (this.stepNames.has(step.name) || incoming.has(step.name)) {
         throw new UsageError(
-          `Pipeline "${this.name}" already has a step named "${step.name}"`,
+          `Pipeline "${this.name}" already has a step named "${step.name}". Step ` +
+            `names must be unique across the whole pipeline, so rename this one or the earlier one.`,
         );
       }
       incoming.add(step.name);
@@ -336,7 +346,9 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   ): Step<TOuterContext> {
     if (typeof options?.mapInput !== 'function') {
       throw new UsageError(
-        `Pipeline "${this.name}" asStep "${name}" requires a mapInput function`,
+        `Pipeline "${this.name}" asStep "${name}" expected a mapInput function, ` +
+          `which derives the inner pipeline's input from the outer context. Pass one, ` +
+          `e.g. mapInput: (ctx) => ({ items: ctx.input.items }).`,
       );
     }
     const run = async (

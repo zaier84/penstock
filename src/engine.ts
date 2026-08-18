@@ -28,20 +28,23 @@ export class Engine {
     const bundle: unknown = methods;
     if (bundle === null || typeof bundle !== 'object') {
       throw new UsageError(
-        `Engine "${name}" requires a non-empty object of methods`,
+        `Engine "${name}" expected an object of methods but received a ${typeof bundle}. ` +
+          `Pass a record of functions, e.g. new Engine("pricing", { total(order) {} }).`,
       );
     }
     const keys = Object.keys(bundle);
     if (keys.length === 0) {
       throw new UsageError(
-        `Engine "${name}" requires a non-empty object of methods`,
+        `Engine "${name}" expected at least one method but received an empty object. ` +
+          `Add a function, e.g. { total(order) {} }.`,
       );
     }
     const record = bundle as Record<string, unknown>;
     for (const key of keys) {
       if (typeof record[key] !== 'function') {
         throw new UsageError(
-          `Engine "${name}" method "${key}" must be a function`,
+          `Engine "${name}" expected method "${key}" to be a function but received ` +
+            `a ${typeof record[key]}. Every value in an engine's method bundle must be callable.`,
         );
       }
     }
@@ -63,10 +66,20 @@ const globalRegistry = new Map<string, Engine>();
  * throws a `UsageError` — no silent override (section 3.5). The registry is
  * process-wide shared mutable state; `Pipeline.useEngine` is the isolated,
  * recommended alternative for apps that want no globals.
+ *
+ * @deprecated Use `pipeline.useEngine(engine)` instead (0.5.0 spec, section 4).
+ * The global registry is process-wide mutable state: it leaks between tests
+ * unless every suite remembers `clearEngines()`, and two pipelines cannot use
+ * different engines under the same name. Pipeline-scoped registration has
+ * neither problem. Still fully supported; removal is a 1.0 decision.
  */
 export function registerEngine(engine: Engine): void {
   if (globalRegistry.has(engine.name)) {
-    throw new UsageError(`Engine "${engine.name}" is already registered`);
+    throw new UsageError(
+      `Engine "${engine.name}" is already registered globally, and the registry ` +
+        `refuses silent overrides. Use a different name, call clearEngines() first, ` +
+        `or scope it to one pipeline with useEngine(engine).`,
+    );
   }
   globalRegistry.set(engine.name, engine);
 }
@@ -74,6 +87,10 @@ export function registerEngine(engine: Engine): void {
 /**
  * Empties the global registry. Required for test isolation — suites that call
  * `registerEngine` must invoke this in `afterEach` (section 3.5).
+ *
+ * @deprecated Deprecated alongside {@link registerEngine} (0.5.0 spec, section
+ * 4). It exists only to undo global registration; `pipeline.useEngine(engine)`
+ * needs no teardown at all. Still fully supported; removal is a 1.0 decision.
  */
 export function clearEngines(): void {
   globalRegistry.clear();
@@ -106,7 +123,10 @@ export function createEngineAccessor(
       // like `constructor` is simply unknown — never a prototype-chain hit.
       const engine = scoped.get(prop) ?? globalRegistry.get(prop);
       if (engine === undefined) {
-        throw new UsageError(`Unknown engine "${prop}"`);
+        throw new UsageError(
+          `Unknown engine "${prop}". Register it on the pipeline with ` +
+            `useEngine(engine) before a step reads ctx.engines.`,
+        );
       }
       return engine.methods;
     },

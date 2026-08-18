@@ -92,14 +92,14 @@ class TypedPipelineBuilder {
     // The spec is copied, so a builder modifier applied after `.use()` cannot
     // reach back and mutate a definition that may be shared with another
     // pipeline.
-    return this.pushSpec({ ...specOf(def, 'use') });
+    return this.pushSpec({ ...specOf(def, this.pipelineName, 'use') });
   }
 
   parallel(defs: readonly object[], options?: ParallelOptions): this {
     const steps: Step<ErasedCtx>[] = [];
     const names: string[] = [];
     for (const def of defs) {
-      names.push(specOf(def, 'parallel').name);
+      names.push(specOf(def, this.pipelineName, 'parallel').name);
       steps.push((def as { step: Step<ErasedCtx> }).step);
     }
     // The group's own rules — at least two steps, real Step instances, an
@@ -265,7 +265,8 @@ class TypedPipelineBuilder {
   private assertNameFree(name: string): void {
     if (this.names.has(name)) {
       throw new UsageError(
-        `Pipeline "${this.pipelineName}" already has a step named "${name}"`,
+        `Pipeline "${this.pipelineName}" already has a step named "${name}". Step ` +
+          `names must be unique across the whole pipeline, so rename this one or the earlier one.`,
       );
     }
   }

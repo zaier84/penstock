@@ -23,6 +23,13 @@ export interface UseCaseResult {
  * cross-pipeline data flow is intentionally out of scope for the MVP (section 8). Like
  * `Pipeline`, the instance holds only immutable config; all run state is
  * `execute`-local, so a `UseCase` is safe to run repeatedly and concurrently.
+ *
+ * @deprecated Use `Pipeline.asStep()` — or `compose()` on the typed builder —
+ * instead (0.5.0 spec, section 4). Both nest one pipeline inside another while
+ * letting data flow between them, which a `UseCase` cannot: it runs each
+ * pipeline on the same input with its own isolated context, so nothing one
+ * pipeline produces can reach the next. Still fully supported; removal is a
+ * 1.0 decision.
  */
 export class UseCase<TInput = unknown> {
   readonly name: string;
@@ -46,7 +53,10 @@ export class UseCase<TInput = unknown> {
     pipeline: Pipeline<TContext>,
   ): this {
     if (!(pipeline instanceof Pipeline)) {
-      throw new UsageError('UseCase.addPipeline expects a Pipeline instance');
+      throw new UsageError(
+        `UseCase "${this.name}" addPipeline expected a Pipeline instance but ` +
+          `received a ${typeof pipeline}. Pass a Pipeline, e.g. new Pipeline("process-order").`,
+      );
     }
     this.pipelines.push(pipeline as unknown as Pipeline<BaseContext<TInput>>);
     return this;

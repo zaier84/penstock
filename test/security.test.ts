@@ -6,6 +6,7 @@ import { StepError, UsageError } from '../src/errors';
 import { Pipeline } from '../src/pipeline';
 import { serializeResult } from '../src/serialize';
 import { Step } from '../src/step';
+import { pipeline } from '../src/typed/index';
 import type { Result, Tracer } from '../src/types';
 
 // The names that must be rejected everywhere a name is accepted (section 1.10).
@@ -140,5 +141,56 @@ describe('security invariants (section 1.10)', () => {
         (Object.prototype as Record<string, unknown>).polluted,
       ).toBeUndefined();
     });
+  });
+});
+
+describe('error-message hygiene (section 1.10 applied to error text)', () => {
+  const SECRET = 'sk_live_never_in_an_error';
+
+  it('names the offending key but never the payload behind it', async () => {
+    const result = await pipeline<{ id: string }>('hygiene-reserved')
+      .step('offender', () => {
+        const out: Record<string, unknown> = { token: SECRET };
+        Object.defineProperty(out, '__proto__', {
+          value: SECRET,
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+        return out;
+      })
+      .execute({ id: 'ord_1' });
+
+    expect(result.ok).toBe(false);
+    const cause = (result.error as StepError).cause;
+    expect(cause).toBeInstanceOf(UsageError);
+    expect((cause as UsageError).message).toContain('offender');
+    expect((cause as UsageError).message).toContain('__proto__');
+    expect((cause as UsageError).message).not.toContain(SECRET);
+  });
+
+  it('names the shape of a rejected return, never its value', async () => {
+    const result = await pipeline<{ id: string }>('hygiene-shape')
+      .step('offender', () => SECRET as unknown as object)
+      .execute({ id: 'ord_1' });
+
+    const cause = (result.error as StepError).cause;
+    expect((cause as UsageError).message).toContain('a string');
+    expect((cause as UsageError).message).not.toContain(SECRET);
+  });
+
+  it('keeps input out of a message raised while a context is live', async () => {
+    const result = await new Pipeline('hygiene-engine')
+      .addStep(
+        new Step('reads-engine', (ctx) => {
+          void (ctx.engines as Record<string, unknown>).missing;
+        }),
+      )
+      .execute({ apiKey: SECRET });
+
+    const cause = (result.error as StepError).cause;
+    expect(cause).toBeInstanceOf(UsageError);
+    expect((cause as UsageError).message).toContain('missing');
+    expect((cause as UsageError).message).not.toContain(SECRET);
   });
 });

@@ -26,10 +26,17 @@ export function assertSafeName(
   name: unknown,
 ): asserts name is string {
   if (typeof name !== 'string' || name.length === 0) {
-    throw new UsageError(`${kind} name must be a non-empty string`);
+    throw new UsageError(
+      `${kind} name must be a non-empty string. It identifies the ` +
+        `${kind.toLowerCase()} in results, logs, and traces, so pass something ` +
+        `descriptive like "validate-order".`,
+    );
   }
   if (RESERVED_NAMES.has(name)) {
-    throw new UsageError(`${kind} name "${name}" is reserved and not allowed`);
+    throw new UsageError(
+      `${kind} name "${name}" is reserved, because __proto__, prototype and ` +
+        `constructor can pollute the prototype chain. Choose a different name.`,
+    );
   }
 }
 

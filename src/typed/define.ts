@@ -174,12 +174,17 @@ const specs = new WeakMap<object, StepSpec>();
  * which is the only way `use` can tell a stray object from a definition: the
  * brand is a type-level fiction with no runtime trace.
  */
-export function specOf(def: object, method: string): StepSpec {
+export function specOf(
+  def: object,
+  pipelineName: string,
+  method: string,
+): StepSpec {
   const spec = specs.get(def);
   if (spec === undefined) {
     throw new UsageError(
-      `Pipeline .${method}() expects a step definition created by ` +
-        `defineStep(). Create one with defineStep<Input>()(name, run).`,
+      `Pipeline "${pipelineName}" .${method}() expected a step definition created ` +
+        `by defineStep(). Create one with defineStep<Input>()(name, run), then pass ` +
+        `it here.`,
     );
   }
   return spec;

@@ -35,7 +35,10 @@ export class Step<TContext extends BaseContext = BaseContext> {
     const options: StepOptions<TContext> =
       typeof fnOrOptions === 'function' ? { run: fnOrOptions } : fnOrOptions;
     if (typeof options.run !== 'function') {
-      throw new UsageError(`Step "${name}" must define a "run" function`);
+      throw new UsageError(
+        `Step "${name}" expected a run function but received a ${typeof options.run}. ` +
+          `Pass a function as the second argument, or as the "run" property of an options object.`,
+      );
     }
     // Validate retry/timeout synchronously at construction (section 1.7): bad
     // config is misuse, so it fails fast as a UsageError, not as run-time data.
@@ -43,17 +46,22 @@ export class Step<TContext extends BaseContext = BaseContext> {
       const { attempts, delayMs } = options.retry;
       if (attempts < 1) {
         throw new UsageError(
-          `Step "${name}" retry.attempts must be at least 1`,
+          `Step "${name}" expected retry.attempts to be at least 1, since it counts ` +
+            `the first try and not just the retries. Use 1 for no retry, or omit retry entirely.`,
         );
       }
       if (delayMs !== undefined && delayMs < 0) {
         throw new UsageError(
-          `Step "${name}" retry.delayMs must be greater than or equal to 0`,
+          `Step "${name}" expected retry.delayMs to be 0 or greater. Omit it for no ` +
+            `wait between attempts.`,
         );
       }
     }
     if (options.timeout !== undefined && options.timeout <= 0) {
-      throw new UsageError(`Step "${name}" timeout must be greater than 0`);
+      throw new UsageError(
+        `Step "${name}" expected timeout to be greater than 0 milliseconds. Omit it ` +
+          `to leave the step without a per-attempt timeout.`,
+      );
     }
     // An idempotency key override is either a verbatim non-empty string or a
     // function evaluated once per invocation (0.4.0 spec, section 1.4).
@@ -66,7 +74,9 @@ export class Step<TContext extends BaseContext = BaseContext> {
         (typeof key === 'string' && key.length > 0);
       if (!usable) {
         throw new UsageError(
-          `Step "${name}" idempotencyKey must be a non-empty string or a function`,
+          `Step "${name}" expected idempotencyKey to be a non-empty string or a ` +
+            `function returning one, but received a ${typeof key}. Omit it to use the ` +
+            `default key, which combines the execution id and the step name.`,
         );
       }
     }
