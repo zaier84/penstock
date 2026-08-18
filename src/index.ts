@@ -2,6 +2,7 @@
 
 export { Step } from './step';
 export { Pipeline } from './pipeline';
+export { pipeline } from './typed/index';
 export type { ExecuteOptions } from './pipeline';
 export { serializeResult } from './serialize';
 export { Engine, registerEngine, clearEngines } from './engine';
@@ -36,3 +37,12 @@ export type {
   Tracer,
   UndoFn,
 } from './types';
+export type {
+  Merge,
+  Simplify,
+  StateOf,
+  StepReturn,
+  TypedCtx,
+  TypedPipeline,
+  UnionToIntersection,
+} from './typed/index';

@@ -9,8 +9,8 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],
-      // src/index.ts is pure re-exports; exclude it from coverage accounting.
-      exclude: ['src/index.ts'],
+      // Both are pure re-exports; exclude them from coverage accounting.
+      exclude: ['src/index.ts', 'src/typed/index.ts'],
       thresholds: {
         statements: 95,
         branches: 95,
