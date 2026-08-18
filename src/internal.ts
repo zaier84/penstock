@@ -4,9 +4,10 @@ import { UsageError } from './errors';
  * Names that must never be used for a step, pipeline, engine, or use-case: they
  * collide with object-prototype keys and are a prototype-pollution vector
  * (section 1.10). Held in a `Set` so the membership check never walks the prototype
- * chain.
+ * chain. Exported so a single set backs every guard, including the typed
+ * builder contribution-key check (0.5.0 spec, section 3.1).
  */
-const RESERVED_NAMES: ReadonlySet<string> = new Set([
+export const RESERVED_NAMES: ReadonlySet<string> = new Set([
   '__proto__',
   'prototype',
   'constructor',
