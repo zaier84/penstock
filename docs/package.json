@@ -1,0 +1,22 @@
+{
+  "name": "penstock-docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Documentation site for penstock. Dependency-isolated from the library: none of this appears in the root package.json, so the root npm ci stays fast across the Node 20/22/24 matrix, the root audit surface stays small, and `dependencies: {}` stays trivially verifiable.",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check:links": "node scripts/check-links.mjs",
+    "astro": "astro"
+  },
+  "devDependencies": {
+    "@astrojs/starlight": "^0.41.7",
+    "astro": "^7.2.4",
+    "starlight-typedoc": "^0.23.1",
+    "typedoc": "^0.28.20",
+    "typedoc-plugin-markdown": "^4.12.0",
+    "typescript": "^5.9.3"
+  }
+}

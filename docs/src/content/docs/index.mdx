@@ -1,0 +1,66 @@
+---
+title: penstock
+description: Composable, testable backend workflows for Node.js — pipelines, steps, and engines, with first-class reverse-order rollback.
+head:
+  # Starlight appends the site title to every page title; on the home page,
+  # whose title already is the site title, that renders as "penstock | penstock".
+  - tag: title
+    content: penstock — composable backend workflows for Node.js
+---
+
+penstock turns sprawling sequential backend logic into a series of named,
+testable, composable **steps**. A pipeline threads one typed context through its
+steps in order, evaluating guards, firing observer hooks, and — when a step
+fails — walking backwards to undo the work that already happened.
+
+Failure comes back as data. A structured `Result` tells you which steps ran,
+were skipped, failed, or rolled back, with timings and the causal error. The
+library has **zero runtime dependencies** and a deliberately small,
+prototype-pollution-safe surface.
+
+## Install
+
+```sh
+npm install penstock
+```
+
+Node `>=20` (22+ recommended). Dual ESM + CommonJS builds with bundled types.
+The optional `penstock/otel` adapter requires `@opentelemetry/api`, which you
+install only if you use it.
+
+## A pipeline that undoes itself
+
+Each step declares what it **produces**, and the context type accumulates down
+the chain — so a key is required from the moment its step has run, with no
+non-null assertions anywhere.
+
+```ts
+import { pipeline } from 'penstock';
+
+const checkout = pipeline<OrderInput>('checkout')
+  .step('reserve', async (ctx) => ({
+    reservationId: await reserve(ctx.input.items),
+  }))
+  .undo(async (ctx) => release(ctx.reservationId)) // required — no `!`
+  .step('charge', async (ctx) => ({
+    chargeId: await charge(ctx.input.card, ctx.reservationId),
+  }));
+
+const result = await checkout.execute(order);
+result.context.chargeId; // string
+```
+
+If `charge` throws, `reserve` is compensated before `execute` resolves, and
+`result.steps` records exactly what happened to each step.
+
+## Where to go next
+
+The API reference is generated from the source, so it cannot drift from the
+implementation — one section per published entry point:
+
+- [`penstock`](./reference/penstock/) — the whole core surface: the typed
+  builder, `Step`, `Pipeline`, `Engine`, `Result`, and the error types.
+- [`penstock/otel`](./reference/otel/) — the optional OpenTelemetry adapter.
+
+Concept pages, guides, and a cookbook are being written and will appear in the
+sidebar as they land.

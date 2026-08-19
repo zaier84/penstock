@@ -1,0 +1,81 @@
+# Builds and deploys the documentation site to GitHub Pages.
+#
+# Kept entirely separate from ci.yml: the library's gates run on a Node 20/22/24
+# matrix against the root project, which has no knowledge of the docs
+# toolchain. Nothing here installs anything at the repository root.
+#
+# Pull requests build but never deploy, so a docs change is verified before it
+# is published without granting PR runs any write permission.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+# Least privilege by default; the deploy job below adds exactly what Pages
+# needs, and only to itself.
+permissions:
+  contents: read
+
+# A newer commit supersedes an in-flight docs build, but a running deployment
+# is never cancelled halfway.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      # The API reference is generated from ../src, so the build needs the
+      # library source — but not its dependencies, and never its lockfile.
+      - name: Install
+        run: npm ci
+        working-directory: docs
+      - name: Build
+        run: npm run build
+        working-directory: docs
+      # The site lives under a /penstock base path, where a link that forgot
+      # the prefix works in dev and 404s in production.
+      - name: Check internal links
+        run: npm run check:links
+        working-directory: docs
+      - uses: actions/configure-pages@v6
+        if: github.event_name != 'pull_request'
+      - uses: actions/upload-pages-artifact@v5
+        if: github.event_name != 'pull_request'
+        with:
+          path: docs/dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="penstock">
+  <title>penstock</title>
+  <!-- A penstock: the gated conduit narrowing under pressure toward the
+       turbine it drives. The conduit is the pipeline, the gate the guard. -->
+  <path d="M5 4 h6 l3 12 v12 h-6 v-12 Z" fill="#2563eb" />
+  <path d="M21 4 h6 l-3 12 v12 h-6 v-12 Z" fill="#2563eb" opacity="0.55" />
+  <rect x="12" y="13" width="8" height="2.5" rx="1.25" fill="#0f172a" />
+</svg>
