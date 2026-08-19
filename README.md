@@ -29,9 +29,11 @@ recommended).
 
 ## Quick start
 
+Each step declares what it **produces**, and the context type accumulates down the chain — so a key
+is required from the moment its step has run, with no non-null assertions anywhere.
+
 ```ts
-import { Engine, Pipeline, Step } from 'penstock';
-import type { BaseContext } from 'penstock';
+import { Engine, pipeline } from 'penstock';
 
 interface LineItem {
   sku: string;
@@ -44,13 +46,6 @@ interface OrderInput {
   customer: { id: string; tier: 'standard' | 'premium' };
 }
 
-// Mid-run fields are optional: they don't exist until the step that sets them.
-interface OrderCtx extends BaseContext<OrderInput> {
-  reservationId?: string;
-  subtotal?: number;
-  total?: number;
-}
-
 // An engine is a reusable bundle of domain functions, called by steps.
 const pricingEngine = new Engine('pricing', {
   subtotal(order: OrderInput): number {
@@ -58,38 +53,27 @@ const pricingEngine = new Engine('pricing', {
   },
 });
 
-const orderPipeline = new Pipeline<OrderCtx>('process-order')
-  .addStep(
-    new Step<OrderCtx>('validate-order', (ctx) => {
-      if (ctx.input.items.length === 0) throw new Error('Order has no items');
-    }),
-  )
-  .addStep(
-    new Step<OrderCtx>('reserve-inventory', {
-      run: (ctx) => {
-        ctx.reservationId = `rsv_${ctx.input.customer.id}`;
-      },
-      undo: (ctx) => {
-        console.log(`released inventory ${ctx.reservationId}`);
-      },
-    }),
-  )
-  .addStep(
-    new Step<OrderCtx>('calculate-total', (ctx) => {
-      // Engine methods are typed as returning `unknown`; cast at the call site.
-      ctx.subtotal = ctx.engines.pricing.subtotal(ctx.input) as number;
-      ctx.total = ctx.subtotal;
-    }),
-  )
-  .addStep(
-    new Step<OrderCtx>('apply-premium-discount', {
-      run: (ctx) => {
-        ctx.total = Math.round((ctx.total ?? 0) * 0.9 * 100) / 100;
-      },
-      when: (ctx) => ctx.input.customer.tier === 'premium',
-    }),
-  )
-  .useEngine(pricingEngine);
+const orderPipeline = pipeline<OrderInput>('process-order')
+  .useEngine(pricingEngine)
+  .step('validate-order', (ctx) => {
+    if (ctx.input.items.length === 0) throw new Error('Order has no items');
+  })
+  .step('reserve-inventory', (ctx) => ({
+    reservationId: `rsv_${ctx.input.customer.id}`,
+  }))
+  .undo((ctx) => {
+    // ctx.reservationId is a string here — the step above produced it.
+    console.log(`released inventory ${ctx.reservationId}`);
+  })
+  .step('calculate-total', (ctx) => {
+    // Engine methods are typed as returning `unknown`; cast at the call site.
+    const subtotal = ctx.engines.pricing.subtotal(ctx.input) as number;
+    return { subtotal, total: subtotal };
+  })
+  .step('apply-premium-discount', (ctx) => ({
+    total: Math.round(ctx.total * 0.9 * 100) / 100,
+  }))
+  .when((ctx) => ctx.input.customer.tier === 'premium');
 
 const result = await orderPipeline.execute({
   items: [
@@ -111,43 +95,70 @@ ok: true | total: 2250
 steps: validate-order:completed, reserve-inventory:completed, calculate-total:completed, apply-premium-discount:completed
 ```
 
-A full, runnable version of this flow (including a forced-failure rollback) lives in
-[`examples/order-processing.ts`](./examples/order-processing.ts) — run it with `npm run example:order`.
+Note what is missing: no context interface to declare up front, and no `ctx.total!`. `ctx.total` is
+a `number` inside `apply-premium-discount` because `calculate-total` returned it, and
+`result.context.total` is a `number` for the same reason.
+
+A full, runnable version lives in [`examples/typed.ts`](./examples/typed.ts) — run it with
+`npm run example:typed`. The same flow written against the underlying class API is in
+[the lower-level API section](#the-lower-level-class-api).
 
 ## Core concepts
 
 ### Step
 
-The atomic unit of work: a named `run` function that receives the shared context and may mutate it.
-A step can declare a `when` guard (a pure predicate that skips it) and an `undo` (compensation run
-during rollback). Steps are immutable and reusable — `.when(...)` returns a configured **clone**
-rather than mutating the original.
+The atomic unit of work: a named function that receives the shared context, may read everything
+produced before it, and **returns what it produces**. That return value is merged onto the context,
+which is what makes the next step's types grow.
+
+A step can be guarded with `.when(...)` (a pure predicate that skips it) and compensated with
+`.undo(...)` (run during rollback). Both chain **after** the step they modify, so they already know
+its output type — `.undo()` sees it as required, `.when()` widens it to optional for later steps.
 
 ```ts
-const reserve = new Step<OrderCtx>('reserve-inventory', {
-  run: async (ctx) => {
-    ctx.reservationId = await reserve(ctx.input.items);
-  },
-  undo: async (ctx) => {
-    await release(ctx.reservationId!);
-  },
-});
+pipeline<OrderInput>('process-order')
+  .step('reserve-inventory', async (ctx) => ({
+    reservationId: await reserve(ctx.input.items),
+  }))
+  .undo(async (ctx) => release(ctx.reservationId)) // required — no `!`
+  .retry({ attempts: 3, backoff: 'exponential' });
+```
 
-const premiumOnly = reserve.when(
-  (ctx) => ctx.input.customer.tier === 'premium',
+Returning nothing is fine — a step that only validates, or only calls out, contributes no keys.
+
+Steps can also be declared **once and reused** with `defineStep`, which is a two-stage call because
+TypeScript cannot infer some type arguments and not others. The first call fixes the input type (and
+any prior state the step requires); the second infers what it produces.
+
+```ts
+import { defineStep } from 'penstock';
+
+const forOrder = defineStep<OrderInput>();
+const fetchPricing = forOrder('fetch-pricing', async (ctx) => ({
+  price: await pricing.quote(ctx.input.items),
+}));
+
+// A definition may declare state it REQUIRES. Using it too early is a
+// compile error, not a runtime `undefined`:
+const callApi = defineStep<OrderInput, { token: string }>()(
+  'call-api',
+  async (ctx) => ({ profile: await api.get(ctx.token) }),
 );
 ```
 
+Add one with `.use(def)`. Definitions are immutable: `.retry(...)`, `.when(...)` and friends return
+a **new** definition, so one can be shared across pipelines and specialised per use.
+
 ### Pipeline
 
-An ordered, named collection of steps. It threads one context through them, evaluates guards, fires
+An ordered, named chain. It threads one context through its steps, evaluates guards, fires observer
 hooks, and owns error handling and the rollback chain. `execute` builds a **fresh context per call**
 and resolves with a `Result`.
 
 ```ts
-const pipeline = new Pipeline<OrderCtx>('process-order')
-  .addStep(validateOrder)
-  .addStep(reserveInventory)
+const checkout = pipeline<OrderInput>('process-order')
+  .step('validate', validateOrder)
+  .use(fetchPricing)
   .before((ctx, step) => {
     /* observe */
   })
@@ -157,18 +168,23 @@ const pipeline = new Pipeline<OrderCtx>('process-order')
   .onError((err, ctx, step) => {
     /* observe a failure, before rollback */
   });
+
+const result = await checkout.execute(input);
 ```
+
+Observer hooks see a `Partial` of the accumulated state, which is type-honest: they fire for _every_
+step, so at any one firing only the keys produced so far exist. Lifecycle callbacks
+(`onComplete` and friends) fire once at the end and see the full state.
 
 ### Engine
 
 A reusable, named bundle of domain functions, invoked by steps via `ctx.engines.<name>`. Engines are
-callable services, not part of the linear flow — they keep domain logic out of step wiring. Register
-one globally with `registerEngine`, or scope it to a single pipeline with `useEngine` (the
-recommended, no-globals approach; a scoped engine shadows a global one of the same name). Accessing an
-unregistered name throws a clear `UsageError`, never `undefined`.
+callable services, not part of the linear flow — they keep domain logic out of step wiring. Scope one
+to a pipeline with `.useEngine(...)`; accessing an unregistered name throws a clear `UsageError`,
+never `undefined`.
 
 ```ts
-import { Engine, registerEngine } from 'penstock';
+import { Engine, pipeline } from 'penstock';
 
 const pricing = new Engine('pricing', {
   total(order: OrderInput) {
@@ -176,44 +192,41 @@ const pricing = new Engine('pricing', {
   },
 });
 
-registerEngine(pricing); // process-wide; or: pipeline.useEngine(pricing)
+pipeline<OrderInput>('process-order')
+  .useEngine(pricing)
+  .step('total', (ctx) => ({
+    total: ctx.engines.pricing.total(ctx.input) as number,
+  }));
 ```
+
+There is also a process-wide `registerEngine` / `clearEngines` registry, **deprecated since 0.5.0**
+in favour of `.useEngine(...)` — see [the lower-level API](#the-lower-level-class-api).
 
 ### Context
 
 The context is one mutable object created per `execute` call and threaded by reference through every
-step. The library owns `BaseContext` (`input`, `engines`, `logger`, `signal`, `executionId`); you
-extend it with your own working fields. Explicit shared context keeps data flow legible and decouples
-steps from each other's signatures; the tradeoff (steps can overwrite each other's keys) is mitigated
-by naming discipline, types, and tests.
+step. The library owns `BaseContext` (`input`, `engines`, `logger`, `signal`, `executionId`); your
+steps add to it by returning objects.
+
+Anything a step returns is merged onto the context, and the type follows. Returning a key that is
+already there overwrites it, exactly as an assignment would. What you **cannot** return is one of
+the library's own fields, or `__proto__` / `prototype` / `constructor` — those raise a `UsageError`
+rather than being merged, which is the same prototype-pollution guard that governs every other
+name in the library.
 
 ```ts
-interface OrderCtx extends BaseContext<OrderInput> {
-  reservationId?: string; // populated by reserve-inventory
-  total?: number; // populated by calculate-total
-}
+pipeline<OrderInput>('demo')
+  .step('a', () => ({ reservationId: 'rsv_1' }))
+  .step('b', (ctx) => {
+    ctx.reservationId; // string — required, because step 'a' produced it
+    ctx.total; // ✗ compile error — nothing has produced it yet
+  });
 ```
 
 `ctx.executionId` is a UUID generated per `execute` call — the correlation id shared by that run's
 logs, traces, and default idempotency keys, and surfaced again as `result.executionId`. A pipeline
-run through `asStep` is a **separate** execution with its own id, tied to the outer run through
+run through `compose` is a **separate** execution with its own id, tied to the outer run through
 `StepReport.innerResult`.
-
-### UseCase
-
-A thin composition that runs one or more pipelines **sequentially on the same input**, aggregating
-their results and short-circuiting on the first failure. Each pipeline builds its own fresh context —
-pipelines do not share mutable state.
-
-```ts
-import { UseCase } from 'penstock';
-
-const checkout = new UseCase('checkout')
-  .addPipeline(orderPipeline)
-  .addPipeline(fulfillmentPipeline);
-
-const result = await checkout.execute(input); // { ok, pipelines, error }
-```
 
 ## Rollback & compensation
 
@@ -230,8 +243,13 @@ would release.
 - `onError` hooks fire once, for the originating failure, **before** rollback begins.
 
 ```ts
-// Same pipeline as the quick start, with a step that fails at shipping.
-const failed = await orderPipeline.execute({
+// The quick-start pipeline, with one more step that fails at shipping.
+const shipped = orderPipeline.step('ship-order', (ctx) => {
+  if (ctx.input.failOnShip) throw new Error('carrier rejected the shipment');
+  return { trackingId: `trk_${ctx.input.customer.id}` };
+});
+
+const failed = await shipped.execute({
   items: [{ sku: 'A-1', price: 1000, qty: 2 }],
   customer: { id: 'cust_42', tier: 'premium' },
   failOnShip: true,
@@ -260,6 +278,9 @@ the original thrown error. If you prefer `try/catch`, pass `{ throwOnError: true
 `PipelineError` is thrown instead, carrying the full `.result`, the originating `.cause`, and — when
 any `undo` failed — a native `AggregateError` on `.rollbackErrors`.
 
+A runnable version of exactly this — rollback across a parallel group and a retried step — is in
+[`examples/typed.ts`](./examples/typed.ts).
+
 ## Reliability
 
 penstock adds four opt-in reliability controls: per-step **retry**, per-step **timeout**,
@@ -274,8 +295,9 @@ which the shared context cannot, since one context is threaded through the whole
 the concurrent steps of a parallel group.
 
 ```ts
-new Step<OrderCtx>('charge-payment', {
-  run: async (ctx, meta) => {
+pipeline<OrderInput>('process-order').step(
+  'charge-payment',
+  async (ctx, meta) => {
     meta.stepName; // 'charge-payment'
     meta.pipelineName; // 'process-order'
     meta.executionId; // UUID for this execute() call
@@ -289,7 +311,7 @@ new Step<OrderCtx>('charge-payment', {
       signal: meta.signal,
     });
   },
-});
+);
 ```
 
 Declaring fewer parameters stays valid — a one-argument `run` is unaffected. Guards deliberately
@@ -304,12 +326,11 @@ between attempts are `'fixed'` (default) or `'exponential'`, with optional `jitt
 retried — a `when` guard and an `undo` are never retried.
 
 ```ts
-const fetchInventory = new Step<OrderCtx>('fetch-inventory', {
-  run: async (ctx) => {
-    ctx.inventoryToken = await inventory.reserve(ctx.input.items);
-  },
-  retry: { attempts: 3, delayMs: 500, backoff: 'exponential' },
-});
+pipeline<OrderInput>('process-order')
+  .step('fetch-inventory', async (ctx) => ({
+    inventoryToken: await inventory.reserve(ctx.input.items),
+  }))
+  .retry({ attempts: 3, delayMs: 500, backoff: 'exponential' });
 ```
 
 The resulting `StepReport.attempts` records how many times `run` was actually called — a step that
@@ -322,10 +343,9 @@ succeeded on its third try reports `attempts: 3`.
 attempt**, so it composes with `retry` — each try gets the full timeout.
 
 ```ts
-const charge = new Step<OrderCtx>('charge-payment', {
-  run: (ctx) => payments.charge(ctx.input.amount),
-  timeout: 5000, // each attempt gets 5s
-});
+pipeline<OrderInput>('process-order')
+  .step('charge-payment', (ctx) => payments.charge(ctx.input.amount))
+  .timeout(5000); // each attempt gets 5s
 ```
 
 ### Idempotency keys
@@ -336,17 +356,16 @@ a double charge. The key is resolved **once per step invocation, before the firs
 reused unchanged for every retry; re-deriving it per attempt would defeat the entire purpose.
 
 ```ts
-const charge = new Step<OrderCtx>('charge-payment', {
-  run: async (ctx, meta) => {
+pipeline<OrderInput>('process-order')
+  .step('charge-payment', async (ctx, meta) => {
     await gateway.charge(ctx.input.amount, {
       idempotencyKey: meta.idempotencyKey, // identical on attempts 1, 2 and 3
     });
-  },
-  retry: { attempts: 3 },
+  })
+  .retry({ attempts: 3 })
   // Derived from the order, so re-running the whole pipeline for this order
   // presents the gateway with the same key again.
-  idempotencyKey: (ctx) => `charge:${ctx.input.orderId}:${ctx.input.amount}`,
-});
+  .idempotencyKey((ctx) => `charge:${ctx.input.orderId}:${ctx.input.amount}`);
 ```
 
 Every step has a key whether or not you configure one. The default is
@@ -387,7 +406,7 @@ Inside a step there are **two** signals, and the distinction matters:
   cancelled". A step's timeout does not abort it.
 
 ```ts
-new Step<OrderCtx>('reindex', async (ctx, meta) => {
+pipeline<OrderInput>('reindex-all').step('reindex', async (ctx, meta) => {
   for (const batch of batches) {
     if (meta.signal.aborted) return; // cancellation, timeout, or peer failure
     await indexer.write(batch, { signal: meta.signal });
@@ -411,7 +430,7 @@ A full, runnable example combining retry, timeout and cancellation lives in
 
 ## Parallel step groups
 
-`addParallel([...])` runs independent steps **concurrently**. A group occupies a single logical
+`.parallel([...])` runs independent step definitions **concurrently**. A group occupies a single logical
 position in the pipeline: everything before it has finished, all of its steps start together, and
 the next entry runs only once every one of them has settled. Guards are still evaluated
 sequentially, in declaration order, before anything launches — and `result.steps[]` always lists
@@ -419,10 +438,17 @@ the group in declaration order, regardless of completion order, so the `Result` 
 deterministic.
 
 ```ts
-const pipeline = new Pipeline<OrderCtx>('process-order')
-  .addStep(validateOrder)
-  .addParallel([fetchInventory, checkFraud, fetchPricing]) // concurrent
-  .addStep(chargePayment);
+const forOrder = defineStep<OrderInput>();
+const fetchInventory = forOrder('fetch-inventory', async (ctx) => ({
+  inventoryToken: await inventory.reserve(ctx.input.items),
+}));
+const checkFraud = forOrder('check-fraud', async () => ({ fraudScore: 0.02 }));
+const fetchPricing = forOrder('fetch-pricing', async () => ({ price: 2500 }));
+
+const checkout = pipeline<OrderInput>('process-order')
+  .step('validate-order', validateOrder)
+  .parallel([fetchInventory, checkFraud, fetchPricing]) // concurrent
+  .step('charge-payment', chargePayment);
 ```
 
 When any parallel step fails (after its retries), the group **cancels its peers**: in-flight steps
@@ -434,9 +460,19 @@ peer stopped by the group abort reports `'skipped'` with
 declaration order (every failure keeps its own `StepReport.error`). Retry, timeout, guards, undo,
 and hooks all work inside a group exactly as they do sequentially.
 
+Every definition's contribution is merged into the accumulated type, so a later step sees
+`ctx.inventoryToken`, `ctx.fraudScore` and `ctx.price` all at once. It takes an **array**, not an
+object: declaration order decides rollback order and which failure becomes `result.error`, and
+JavaScript reorders integer-like keys in objects — an object form would silently reorder a group
+containing a step named `"1"`.
+
 **Context keys are your responsibility.** All parallel steps share the same mutable `ctx`. Steps
-that write to **distinct** keys are safe; two parallel steps writing the **same** key race. Give
+that write to **distinct** keys are safe; two parallel steps writing the **same** key race — the
+types catch conflicting _types_, but not two steps producing the same key at the same type. Give
 each parallel step its own output field.
+
+Modifiers belong on the individual definitions, not on the group: `.retry()` after `.parallel()`
+throws a `UsageError`, because a modifier targets a single step.
 
 ### Concurrency limits
 
@@ -445,7 +481,7 @@ A fan-out of fifty steps opening fifty connections at once is rarely what you wa
 bounded pool that dispatches **in declaration order** as slots free.
 
 ```ts
-const pipeline = new Pipeline<OrderCtx>('process-order').addParallel(
+const checkout = pipeline<OrderInput>('process-order').parallel(
   [fetchInventory, checkFraud, fetchPricing, fetchShippingRates],
   { concurrency: 2 }, // two in flight; the other two queue
 );
@@ -463,32 +499,30 @@ peer that was cancelled.
 
 ## Pipeline composition
 
-`pipeline.asStep(name, options)` wraps a whole pipeline as a **single step** of an outer pipeline,
-so workflows compose hierarchically. The inner pipeline runs on its **own fresh, isolated
-context**: `mapInput` derives its input from the outer context (the only way in), and `mapResult`
-— called only on inner success — writes its outputs back (the way out). The outer run's logger and
-cancellation signal are forwarded; engines are **not** — the inner pipeline resolves its own
-`useEngine` registrations plus the global registry, never the outer pipeline's scoped engines.
+`.compose(name, inner, options)` nests a whole pipeline as a **single step** of an outer one, so
+workflows compose hierarchically. The inner pipeline runs on its **own fresh, isolated context**:
+`mapInput` derives its input from the outer context (the only way in), and `mapResult` — called
+only on inner success — **returns** a contribution that is merged onto the outer context (the way
+out). The outer run's logger and cancellation signal are forwarded; engines are **not** — the inner
+pipeline resolves its own `useEngine` registrations plus the global registry, never the outer
+pipeline's scoped engines.
 
 ```ts
-const inventoryCheck = new Pipeline<InvCtx>('check-inventory')
-  .addStep(lookupWarehouse)
-  .addStep(reserveStock);
+const inventoryCheck = pipeline<{ items: LineItem[] }>('check-inventory')
+  .step('lookup-warehouse', lookupWarehouse)
+  .step('reserve-stock', async (ctx) => ({
+    reservationId: await reserveStock(ctx.input.items),
+  }));
 
-const orderPipeline = new Pipeline<OrderCtx>('process-order')
-  .addStep(validateOrder)
-  .addStep(
-    inventoryCheck.asStep('run-inventory', {
-      mapInput: (ctx) => ({ items: ctx.input.items }),
-      mapResult: (innerResult, ctx) => {
-        ctx.reservationId = innerResult.context.reservationId;
-      },
-      undo: async (ctx) => {
-        await releaseStock(ctx.reservationId!);
-      },
-    }),
-  )
-  .addStep(chargePayment);
+const orderPipeline = pipeline<OrderInput>('process-order')
+  .step('validate-order', validateOrder)
+  .compose('run-inventory', inventoryCheck, {
+    mapInput: (ctx) => ({ items: ctx.input.items }),
+    // Returns a contribution; the accumulated type follows it.
+    mapResult: (inner) => ({ reservationId: inner.context.reservationId }),
+  })
+  .undo(async (ctx) => releaseStock(ctx.reservationId)) // required — no `!`
+  .step('charge-payment', chargePayment);
 ```
 
 The two rollback chains stay clearly delineated:
@@ -497,16 +531,17 @@ The two rollback chains stay clearly delineated:
   step reports `'failed'` (its `error` chains to the inner failure). The outer pipeline then rolls
   back its own prior steps — inner undos are never re-run.
 - **The inner pipeline succeeds, a later outer step fails** → the inner work is committed. The
-  outer rollback runs the `undo` you gave `asStep` — reversing the inner pipeline's net effect is
+  outer rollback runs the `undo` you chained after `compose` — reversing the inner pipeline's net effect is
   that function's job, because only you know what "undo an entire pipeline" means. Without an
   `undo`, the wrapping step stays `'completed'`.
 - **The outer run is cancelled mid-inner-execution** → the signal propagates in; the inner pipeline
   stops between its steps and rolls back; the wrapping step reports `'skipped'` / `'cancelled'`.
 
 Either way, the wrapping step's report carries the full inner `Result` as
-`StepReport.innerResult`, so the nested execution stays inspectable without `mapResult`. The
-returned value is a regular `Step` — guard it with `when`, clone it with `.when()`, or place it
-inside `addParallel([...])` to run whole pipelines concurrently.
+`StepReport.innerResult`, so the nested execution stays inspectable without `mapResult`. Omitting
+`mapResult` contributes nothing while still running the inner pipeline for its effects, and the
+modifiers chain after `compose` exactly as they do after `step`. The inner pipeline may be another
+typed pipeline or a class-API `Pipeline`.
 
 ## Lifecycle events
 
@@ -515,9 +550,9 @@ rollback**. All are chainable, all can be registered multiple times (they run in
 order), and all receive the final `Result`:
 
 ```ts
-const pipeline = new Pipeline<OrderCtx>('process-order')
-  .addStep(validate)
-  .addStep(charge)
+const checkout = pipeline<OrderInput>('process-order')
+  .step('validate', validate)
+  .step('charge', charge)
   .onComplete((result) => metrics.emit('order.success', result))
   .onFailure((result) => metrics.emit('order.failure', result))
   .onCancel((result) => metrics.emit('order.cancel', result))
@@ -563,12 +598,12 @@ const result = await orderPipeline.execute(order, { tracer: myTracer });
 
 Four kinds of span are produced:
 
-| Span         | Name                                | Parent                       |
-| ------------ | ----------------------------------- | ---------------------------- |
-| Pipeline     | `penstock.pipeline ${pipelineName}` | none, or the `asStep` parent |
-| Step         | `penstock.step ${stepName}`         | pipeline span                |
-| Attempt      | `penstock.attempt ${stepName}#${n}` | step span                    |
-| Compensation | `penstock.undo ${stepName}`         | pipeline span                |
+| Span         | Name                                | Parent                      |
+| ------------ | ----------------------------------- | --------------------------- |
+| Pipeline     | `penstock.pipeline ${pipelineName}` | none, or the composing step |
+| Step         | `penstock.step ${stepName}`         | pipeline span               |
+| Attempt      | `penstock.attempt ${stepName}#${n}` | step span                   |
+| Compensation | `penstock.undo ${stepName}`         | pipeline span               |
 
 Attempt spans appear **only when a step actually retries** (`maxAttempts > 1`) — for a single-attempt
 step they would merely duplicate the step span. Every `StepReport` gets exactly one step span,
@@ -589,7 +624,7 @@ durations, and the idempotency key.
 a throw is caught, logged at `warn`, and the run continues unchanged. Every started span is `end()`ed
 on every path — success, failure, rollback, cancellation, and guard throws alike.
 
-Nested pipelines nest their traces: a `pipeline.asStep(...)` run parents its inner pipeline span to
+Nested pipelines nest their traces: a `.compose(...)` run — or `pipeline.asStep(...)` — parents its inner pipeline span to
 the wrapping step's span, so one trace shows the whole composition. `ExecuteOptions.parentSpan` is
 the mechanism, and you can use it directly to graft a penstock run onto a span your own code started.
 
@@ -677,30 +712,280 @@ See [`examples/user-onboarding.ts`](./examples/user-onboarding.ts) (`npm run exa
 
 ## TypeScript
 
-Every primitive is generic over your context type, so `ctx` is fully typed end to end. You define a
-context that extends `BaseContext<TInput>`; `Pipeline<TContext>`, `Step<TContext>`, the hooks, and
-`Result<TContext>` all share it, and `addStep` only accepts a `Step<TContext>`.
+The typed builder tracks what each step produces and accumulates it, so the context type grows as
+the chain does. You never declare a context interface: it is derived.
 
 ```ts
-interface OrderCtx extends BaseContext<OrderInput> {
-  reservationId?: string;
-  total?: number;
-}
-
-new Step<OrderCtx>('calc', (ctx) => {
-  ctx.input; // OrderInput (readonly)
-  ctx.total; // number | undefined
-  ctx.missing; // ✗ compile error — not declared on OrderCtx
-});
+pipeline<OrderInput>('process-order')
+  .step('reserve', async (ctx) => ({ reservationId: await reserve(ctx.input) }))
+  .step('charge', async (ctx) => {
+    ctx.input; // OrderInput (readonly)
+    ctx.reservationId; // string — required, produced above
+    ctx.total; // ✗ compile error — nothing has produced it
+    return { chargeId: await charge(ctx.reservationId) };
+  })
+  .step('discount', () => ({ code: 'SAVE10' }))
+  .when(() => isPromo) // guarded, so `code` may not exist
+  .step('audit', (ctx) => {
+    ctx.chargeId; // string
+    ctx.code; // string | undefined — the guard widened it
+  });
 ```
 
-Fields that steps populate mid-run are declared **optional** because they don't exist until their
-step runs — this is the intended, type-honest pattern. Reach for the non-null assertion (`ctx.total!`)
-in a downstream step once you know an earlier step has set the field.
+Three rules cover the whole type layer:
+
+- **A step's return becomes the next state.** Returning nothing contributes nothing; returning an
+  existing key overwrites it, and the type overwrites with it.
+- **Modifiers chain after the step they modify**, which is what lets `.undo()` see that step's
+  output as **required** and `.when()` widen it to optional. That ordering is not stylistic: typing
+  `undo` from inside the same options object would require inferring a run's return type to type a
+  sibling property of the same object literal, which is circular.
+- **Observers see `Partial`**, lifecycle callbacks see the whole state — because `before` / `after`
+  / `onError` fire per step, when only part of the state exists.
+
+Return types can be named interfaces, not just object literals:
+
+```ts
+interface Reservation {
+  reservationId: string;
+  warehouse: string;
+}
+
+pipeline<OrderInput>('p').step(
+  'reserve',
+  async (ctx): Promise<Reservation> => reserve(ctx.input.items),
+);
+```
+
+That case is why a step's return is constrained to `object` rather than
+`Record<string, unknown>`: an `interface` has no implicit index signature, so an interface-typed
+return is _not_ assignable to a record type and would fail to compile.
+
+`defineStep` can declare state a step **requires**, which turns a misordered pipeline into a
+compile error rather than a runtime `undefined`:
+
+```ts
+const callApi = defineStep<OrderInput, { token: string }>()(
+  'call-api',
+  async (ctx) => ({ profile: await api.get(ctx.token) }),
+);
+
+pipeline<OrderInput>('p').use(callApi); // ✗ compile error — no `token` yet
+
+pipeline<OrderInput>('p')
+  .step('auth', async () => ({ token: await login() }))
+  .use(callApi); // ✓
+```
+
+If you use the [class API](#the-lower-level-class-api) instead, you declare the context yourself and
+mid-run fields are **optional**, because they do not exist until their step runs — that is the
+type-honest pattern there, and `ctx.total!` in a downstream step is the expected idiom. Removing
+that assertion is the reason the builder exists.
+
+## The lower-level class API
+
+Everything above is built on `Step` and `Pipeline` — classes you can use directly. The builder is a
+**facade over them**: `.step(...)` constructs a `Step`, the chain constructs a `Pipeline`, and
+execution, rollback, retry, timeout, cancellation, tracing, and lifecycle events are all the same
+code either way. `toPipeline()` hands you the `Pipeline` the builder describes:
+
+```ts
+const built = pipeline<OrderInput>('process-order')
+  .step('validate', validateOrder)
+  .toPipeline(); // a plain Pipeline<...>, fully configured
+
+built.addStep(extraStep); // carry on with the class API from here
+```
+
+The class API is **fully supported**, not legacy. Reach for it when you need something the chain
+cannot express:
+
+- **Building a pipeline from a dynamic list** — a loop of `addStep` calls, where the steps are not
+  known at compile time and so cannot be typed by accumulation anyway.
+- **Sharing one `Step` instance across pipelines**, or deriving variants with `step.when(...)`.
+  (`defineStep` covers most of this with types intact.)
+- **Declaring the context type yourself**, when it is already defined elsewhere in your codebase.
+
+You give up the accumulation: with the class API, mid-run fields are declared optional on your
+context interface, and downstream steps use `ctx.total!` once an earlier step has set them. A full,
+runnable class-API order flow — including a forced-failure rollback — lives in
+[`examples/order-processing.ts`](./examples/order-processing.ts) (`npm run example:order`).
+
+```ts
+import { Pipeline, Step } from 'penstock';
+import type { BaseContext } from 'penstock';
+
+interface OrderCtx extends BaseContext<OrderInput> {
+  reservationId?: string; // populated by reserve-inventory
+  total?: number; // populated by calculate-total
+}
+
+const orderPipeline = new Pipeline<OrderCtx>('process-order')
+  .addStep(
+    new Step<OrderCtx>('reserve-inventory', {
+      run: (ctx) => {
+        ctx.reservationId = `rsv_${ctx.input.customer.id}`;
+      },
+      undo: (ctx) => {
+        console.log(`released inventory ${ctx.reservationId!}`);
+      },
+    }),
+  )
+  .addStep(
+    new Step<OrderCtx>('calculate-total', (ctx) => {
+      ctx.total = ctx.engines.pricing.subtotal(ctx.input) as number;
+    }),
+  );
+```
+
+### Migrating from the class API
+
+Nothing is required — 0.4.x code compiles unchanged on 0.5.0. If you do move, the mapping is
+mechanical. The same pipeline, both ways:
+
+```ts
+// ── class API ───────────────────────────────────────────────────────────────
+interface OrderCtx extends BaseContext<OrderInput> {
+  reservationId?: string;
+  chargeId?: string;
+}
+
+const orderPipeline = new Pipeline<OrderCtx>('checkout')
+  .addStep(
+    new Step<OrderCtx>('reserve', {
+      run: async (ctx) => {
+        ctx.reservationId = await reserve(ctx.input.items);
+      },
+      undo: async (ctx) => release(ctx.reservationId!), // note the `!`
+      retry: { attempts: 3, backoff: 'exponential' },
+    }),
+  )
+  .addStep(
+    new Step<OrderCtx>('charge', async (ctx) => {
+      ctx.chargeId = await charge(ctx.input.card, ctx.reservationId!);
+    }),
+  );
+
+// ── typed builder ───────────────────────────────────────────────────────────
+const orderPipeline = pipeline<OrderInput>('checkout')
+  .step('reserve', async (ctx) => ({
+    reservationId: await reserve(ctx.input.items),
+  }))
+  .undo(async (ctx) => release(ctx.reservationId)) // no `!`
+  .retry({ attempts: 3, backoff: 'exponential' })
+  .step('charge', async (ctx) => ({
+    chargeId: await charge(ctx.input.card, ctx.reservationId),
+  }));
+```
+
+The three moves are: delete the context interface (it is derived), **return** what you used to
+assign, and move `when` / `undo` / `retry` / `timeout` / `idempotencyKey` out of the options object
+into chained calls after the step. `addParallel` becomes `.parallel` over `defineStep` definitions,
+and `asStep` becomes `.compose`.
+
+### Deprecated in 0.5.0
+
+Both still work exactly as before, and both will keep working until 1.0. Neither emits a runtime
+warning — console noise from a library is disproportionately annoying in test suites.
+
+#### `UseCase`
+
+A thin composition that runs one or more pipelines **sequentially on the same input**, aggregating
+their results and short-circuiting on the first failure. Each pipeline builds its own fresh context —
+pipelines do not share mutable state, which is precisely its limitation: nothing one pipeline
+produces can reach the next.
+
+```ts
+import { UseCase } from 'penstock';
+
+const checkout = new UseCase('checkout')
+  .addPipeline(orderPipeline)
+  .addPipeline(fulfillmentPipeline);
+
+const result = await checkout.execute(input); // { ok, pipelines, error }
+```
+
+**Use `.compose(...)` — or `pipeline.asStep(...)` on the class API — instead.** Both nest one
+pipeline inside another _and_ let data flow between them through `mapInput` / `mapResult`, which is
+the thing a `UseCase` cannot do.
+
+#### `registerEngine` / `clearEngines`
+
+The process-wide engine registry. `registerEngine(engine)` adds to it, `clearEngines()` empties it,
+and `ctx.engines.<name>` falls back to it when no pipeline-scoped engine matches.
+
+```ts
+import { clearEngines, registerEngine } from 'penstock';
+
+registerEngine(pricing); // process-wide
+afterEach(clearEngines); // ...and every test suite must remember this
+```
+
+**Use `.useEngine(engine)` instead.** It is not process-wide mutable state, so it needs no teardown
+in tests, and two pipelines can use different engines under the same name — neither of which the
+global registry allows.
 
 ## API reference
 
+### `pipeline<TInput>(name)`
+
+Starts a typed pipeline. Returns a `TypedPipeline<TInput, TPrev, TLast>`, where `TPrev` is the state
+accumulated before the most recent step and `TLast` is that step's own contribution; the current
+full state is `Merge<TPrev, TLast>`.
+
+- `.step(name, run)` — appends a step. `run(ctx, meta) => StepReturn` may return an object, which is
+  merged onto the context and added to the accumulated type, or nothing. A non-plain-object return
+  (an array, a function, a primitive, a class instance) throws `UsageError` from inside the step, so
+  it surfaces as an ordinary step failure. So does a return keyed `__proto__`, `prototype`,
+  `constructor`, or any of the library's own context fields.
+- `.use(def)` — appends a `defineStep` definition. If the state so far does not satisfy the
+  definition's declared requirement, the call does not compile.
+- `.parallel(defs, options?)` — appends a parallel group over an **array** of definitions; their
+  contributions are intersected into the accumulated type. `options: ParallelOptions`.
+- `.compose(name, inner, options)` — nests a pipeline as one step. `inner` may be a typed pipeline
+  or a class-API `Pipeline`. `options: TypedComposeOptions = { mapInput; mapResult? }` — `mapResult`
+  **returns** a contribution (it may be async; its resolved value is what merges), and omitting it
+  contributes nothing.
+- **Modifiers, applied to the most recent step**: `.when(fn)` (guards it; its contribution becomes
+  `Partial`), `.undo(fn)` (compensation; sees the step's own output as required), `.retry(options)`,
+  `.timeout(ms)`, `.idempotencyKey(key)`. Applying one twice **replaces** the earlier value. Calling
+  one before any step, or after `.parallel(...)`, throws `UsageError`.
+- **Observers and lifecycle**: `.before` / `.after` / `.onError` (typed with a `Partial` of the
+  state, since they fire per step) and `.onComplete` / `.onFailure` / `.onCancel` / `.onSettled`
+  (typed with the full state). `.useEngine(engine)` as on `Pipeline`.
+- `.execute(input, options?)` — same `ExecuteOptions` as `Pipeline.execute`; the `Result`'s context
+  is typed with everything the chain produced.
+- `.toPipeline()` — the underlying `Pipeline`, fully configured.
+
+Step names are validated and de-duplicated when you declare them, so a bad or duplicate name throws
+`UsageError` at that call rather than at run time.
+
+### `defineStep<TInput, TRequires>()`
+
+A **two-stage** call, because TypeScript has no partial type-argument inference: the first call fixes
+the input type and any required prior state, the second infers what the step produces.
+
+```ts
+const forOrder = defineStep<OrderInput>();
+const fetchUser = forOrder('fetch-user', async (ctx) => ({
+  user: await get(ctx.input.id),
+}));
+
+const needsToken = defineStep<OrderInput, { token: string }>()(
+  'call-api',
+  async (ctx) => ({ profile: await call(ctx.token) }),
+);
+```
+
+Returns a `StepDef<TInput, TRequires, TProduces>` carrying `name` and the constructed `step`.
+Definitions are **immutable**: `.when(fn)`, `.undo(fn)`, `.retry(options)`, `.timeout(ms)` and
+`.idempotencyKey(key)` each return a **new** definition, so one can be shared across pipelines and
+specialised per use. `RequiresOf<T>` and `ProducesOf<T>` recover the type parameters.
+
 ### `Step<TContext>`
+
+The lower-level unit the builder constructs for you; see
+[the lower-level class API](#the-lower-level-class-api).
 
 - `new Step(name, runFn)` or
   `new Step(name, { run, when?, undo?, retry?, timeout?, idempotencyKey? })`. `name` must be a
@@ -768,19 +1053,24 @@ interface StepMeta {
 signal?: AbortSignal; tracer?: Tracer; parentSpan?: TraceSpan }`. `tracer` enables span emission
   (none without it, and none in dry-run); `parentSpan` parents this run's pipeline span to an
   existing span, which is how `asStep` nests inner runs.
-- All builder methods are chainable.
+- All builder methods are chainable. `pipeline(...).toPipeline()` returns a `Pipeline` built this
+  way, so anything documented here is reachable from the typed builder.
 
 ### `Engine`
 
 - `new Engine(name, methods)` — `name` non-empty/non-reserved; `methods` a non-empty record of
   functions. Otherwise `UsageError`.
-- `registerEngine(engine)` — adds to the process-wide registry; re-registering a name throws
-  `UsageError`.
-- `clearEngines()` — empties the global registry (call it in `afterEach` in tests).
+- `registerEngine(engine)` — **deprecated in 0.5.0**; adds to the process-wide registry,
+  re-registering a name throws `UsageError`. Use `.useEngine(engine)`.
+- `clearEngines()` — **deprecated in 0.5.0**; empties the global registry (call it in `afterEach`
+  in tests). Pipeline-scoped engines need no teardown.
 - `ctx.engines.<name>.<method>(...)` — resolves pipeline-scoped first, then global; an unknown name
   throws `UsageError`. Methods are typed as returning `unknown`.
 
 ### `UseCase<TInput>`
+
+**Deprecated in 0.5.0** — use `.compose(...)` or `pipeline.asStep(...)`, which nest pipelines _and_
+let data flow between them. Still fully functional; removal is a 1.0 decision.
 
 - `new UseCase(name)` — non-empty, non-reserved name or `UsageError`.
 - `.addPipeline(pipeline)` — appends; rejects a non-`Pipeline` with `UsageError`. Chainable.
