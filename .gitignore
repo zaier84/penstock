@@ -5,3 +5,14 @@ coverage
 .DS_Store
 .env*
 *.tgz
+
+# Documentation site and benchmarks — dependency-isolated sub-projects with
+# their own package.json and lockfile; nothing here belongs to the library.
+docs/node_modules
+docs/dist
+docs/.astro
+bench/node_modules
+
+# API reference pages, regenerated from src/ on every docs build. Committing
+# them would let the reference drift from the source it is generated from.
+docs/src/content/docs/reference/

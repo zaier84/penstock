@@ -1,0 +1,11 @@
+# The documentation site and the benchmark suite are dependency-isolated
+# sub-projects with their own tooling. Formatting .astro/.mdx needs plugins
+# that do not belong in the root project's devDependencies.
+docs/
+bench/
+
+# Local build documents. They are untracked (see .git/info/exclude) but
+# Prettier reads .gitignore only, so they need naming here too.
+BUILD_SPEC.md
+WORKFLOW.md
+PENSTOCK_*.md
