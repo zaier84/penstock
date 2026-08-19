@@ -140,3 +140,58 @@ While in `0.x`, minor versions may include breaking changes.
   concurrently running steps at once.
 
 [0.4.0]: https://github.com/zaier84/penstock/releases/tag/v0.4.0
+
+## [0.5.0] - 2026-08-19
+
+### Added
+
+- A typed pipeline builder — `pipeline<TInput>(name)` — where each step declares what it
+  **produces** and the context type accumulates down the chain. A key is required from the moment
+  its step has run, which removes the `ctx.reservationId!` assertion the class API forces on
+  nearly every line of real code. The builder is a facade: it constructs the same `Step` and
+  `Pipeline` instances, so rollback, retry, timeout, cancellation, tracing, and lifecycle events
+  are inherited unchanged.
+- Chained modifiers on the most recent step: `.when()`, `.undo()`, `.retry()`, `.timeout()`, and
+  `.idempotencyKey()`. `.undo()` sees its own step's output as **required**; `.when()` widens that
+  step's contribution to `Partial` for everything downstream. Applying a modifier twice replaces
+  the earlier value, mirroring `Step.prototype.when`.
+- `defineStep<TInput, TRequires>()(name, run)` — reusable, independently-typed step definitions,
+  added with `.use(def)`. A definition may declare prior state it **requires**, so using it before
+  the step that produces that state is a compile error rather than a runtime `undefined`. Its
+  modifiers return a new definition, so one can be shared across pipelines.
+- `.parallel(defs, options?)` — typed parallel groups over an array of definitions, whose
+  contributions are intersected into the accumulated state.
+- `.compose(name, inner, options)` — nests a pipeline as one step, contributing state by
+  **returning** from `mapResult` (which may be async) rather than mutating the outer context. The
+  inner pipeline may be a typed pipeline or a class-API `Pipeline`.
+- `.toPipeline()` — the underlying `Pipeline`, so anything the builder does not surface stays
+  reachable.
+- New exported types: `TypedPipeline`, `TypedCtx`, `StepDef`, `RequiresOf`, `ProducesOf`,
+  `TypedComposeOptions`, `ComposeContribution`, `InnerInputOf`, `InnerCtxOf`, `StepReturn`,
+  `StateOf`, `Merge`, `Simplify`, and `UnionToIntersection`.
+- `examples/typed.ts`, runnable with `npm run example:typed`.
+
+### Deprecated
+
+- `UseCase` — use `.compose(...)` or `Pipeline.asStep(...)` instead. Both nest one pipeline inside
+  another **and** let data flow between them, which a `UseCase` cannot: it runs each pipeline on
+  the same input with its own isolated context.
+- `registerEngine` and `clearEngines` — use `pipeline.useEngine(engine)` instead. The global
+  registry is process-wide mutable state: it leaks between tests unless every suite remembers
+  `clearEngines()`, and two pipelines cannot use different engines under the same name.
+
+Both remain fully functional and emit no runtime warnings; removal is a `1.0` decision.
+
+### Changed
+
+- Every `UsageError` message now states what was wrong, what was expected, and what to do, and
+  names the pipeline, step, engine, or use-case involved. `Pipeline.addStep`,
+  `Pipeline.addParallel`, and `UseCase.addPipeline` previously named nothing at all. No error
+  **type** changed, so code branching on `UsageError` is unaffected.
+
+### Fixed
+
+- A step throwing a value that refuses string coercion (for example `Object.create(null)`) now
+  returns `ok: false` like any other failure, instead of making `execute()` reject.
+
+[0.5.0]: https://github.com/zaier84/penstock/releases/tag/v0.5.0

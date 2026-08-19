@@ -25,7 +25,7 @@ export interface OtelTracerOptions {
  * A literal, not a `package.json` read: runtime code performs no I/O
  * (`BUILD_SPEC.md` section 1.10). Kept in step with `package.json`.
  */
-const PENSTOCK_VERSION = '0.4.0';
+const PENSTOCK_VERSION = '0.5.0';
 
 /**
  * Adapts penstock's vendor-neutral {@link Tracer} onto OpenTelemetry (0.4.0
