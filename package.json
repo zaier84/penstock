@@ -86,7 +86,8 @@
     "example:onboarding": "tsx examples/user-onboarding.ts",
     "example:reliability": "tsx examples/reliability.ts",
     "example:composition": "tsx examples/composition.ts",
-    "example:production": "tsx examples/production.ts"
+    "example:production": "tsx examples/production.ts",
+    "example:typed": "tsx examples/typed.ts"
   },
   "dependencies": {},
   "peerDependencies": {
