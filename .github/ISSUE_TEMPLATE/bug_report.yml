@@ -1,0 +1,103 @@
+name: Bug report
+description: Something in penstock behaves differently from what it documents.
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file this. The `Result` field below is the
+        single most useful thing you can include — it says what happened to
+        every step.
+
+        **Do not report a security vulnerability here.** See
+        [SECURITY.md](https://github.com/zaier84/penstock/blob/main/SECURITY.md)
+        for private reporting.
+
+  - type: input
+    id: penstock-version
+    attributes:
+      label: penstock version
+      description: 'Output of `npm ls penstock`.'
+      placeholder: '0.5.1'
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node version
+      description: 'Output of `node --version`. penstock supports `>=20`.'
+      placeholder: 'v22.22.3'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module-system
+    attributes:
+      label: Module system
+      options:
+        - ESM (import)
+        - CommonJS (require)
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: |
+        The smallest pipeline that shows the problem — ideally one that runs as
+        written, with stubs instead of real services. Please reduce it before
+        posting; a 200-line excerpt from an application is much harder to act on
+        than 20 lines that fail on their own.
+      render: ts
+      placeholder: |
+        import { pipeline } from 'penstock';
+
+        const p = pipeline<{ id: string }>('repro')
+          .step('a', () => ({ a: 1 }))
+          .step('b', (ctx) => {
+            // ...
+          });
+
+        const result = await p.execute({ id: 'x' });
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should have happened, and where the documentation led you to expect it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+    validations:
+      required: true
+
+  - type: textarea
+    id: result-output
+    attributes:
+      label: The Result
+      description: |
+        `console.log(JSON.stringify(serializeResult(result), null, 2))`.
+
+        `serializeResult` excludes `result.context` by default, so this is safe
+        to paste — but do check it for anything sensitive your step names or
+        idempotency keys might carry.
+      render: json
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: TypeScript version and `strict` setting, bundler, or anything else that might matter.
+    validations:
+      required: false

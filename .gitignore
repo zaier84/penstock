@@ -16,3 +16,7 @@ bench/node_modules
 # API reference pages, regenerated from src/ on every docs build. Committing
 # them would let the reference drift from the source it is generated from.
 docs/src/content/docs/reference/
+
+# Launch drafts and one-off repository notes. Local working documents,
+# not part of the package or the site.
+docs-drafts/

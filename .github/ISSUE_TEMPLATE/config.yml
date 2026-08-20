@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or usage help
+    url: https://github.com/zaier84/penstock/discussions
+    about: Ask in Discussions. Questions get answered faster there, and the answers stay findable.
+  - name: Documentation
+    url: https://zaier84.github.io/penstock/
+    about: Getting started, core concepts, fourteen guides, and a cookbook.
+  - name: Report a security vulnerability
+    url: https://github.com/zaier84/penstock/security/advisories/new
+    about: Report privately. Please do not open a public issue for a vulnerability.

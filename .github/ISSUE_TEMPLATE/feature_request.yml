@@ -1,0 +1,69 @@
+name: Feature request
+description: Propose a capability penstock does not have.
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the **problem** before the solution. penstock is
+        deliberately small, and the most useful proposals are the ones that
+        start from a concrete situation rather than an API shape — the shape is
+        the easy part to argue about later.
+
+        Worth checking first: the [roadmap](https://zaier84.github.io/penstock/roadmap/)
+        lists what is under consideration and what has been dropped, and
+        [why penstock](https://zaier84.github.io/penstock/why-penstock/) sets
+        out what the library deliberately does not do.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: |
+        What are you trying to do, and what happens when you try it today? Be
+        concrete — an actual pipeline, an actual failure mode.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do instead today
+      description: |
+        The workaround, however ugly. If there isn't one, say so — that is
+        itself the strongest argument.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like penstock to do
+      description: |
+        A sketch is fine. If you have an API in mind, show it as code — but the
+        problem above matters more than this section.
+      render: ts
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Would this change existing behaviour?
+      options:
+        - 'No — purely additive'
+        - 'Yes — it would change how something works today'
+        - 'Not sure'
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: |
+        Including other libraries. If Temporal, BullMQ, `p-retry`, or Effect-TS
+        already solves this well, that is useful to know and may be the right
+        answer.
+    validations:
+      required: false
