@@ -94,26 +94,30 @@ Effect-TS, and plain `async`/`await`.
 
 ## Features
 
-- **Rollback and compensation** — reverse-order, best-effort, with failures recorded rather than
+- **[Rollback and compensation](https://zaier84.github.io/penstock/guides/rollback/)** — reverse-order, best-effort, with failures recorded rather than
   thrown.
-- **Retry** — fixed or exponential backoff, optional jitter, per step.
-- **Timeouts** — bound a single attempt; composes with retry.
-- **Idempotency keys** — resolved once per invocation and stable across every retry.
-- **Cancellation** — pass an `AbortSignal`; completed steps roll back exactly as on failure.
-- **Parallel groups** — run independent steps concurrently, with an optional concurrency cap.
-- **Composition** — nest a whole pipeline as one step, with typed data flow in and out.
-- **Lifecycle events** — `onComplete`, `onFailure`, `onCancel`, `onSettled`, fired after any
+- **[Retry](https://zaier84.github.io/penstock/guides/retry/)** — fixed or exponential backoff, optional jitter, per step.
+- **[Timeouts](https://zaier84.github.io/penstock/guides/timeouts/)** — bound a single attempt; composes with retry.
+- **[Idempotency keys](https://zaier84.github.io/penstock/guides/idempotency/)** — resolved once per invocation and stable across every retry.
+- **[Cancellation](https://zaier84.github.io/penstock/guides/cancellation/)** — pass an `AbortSignal`; completed steps roll back exactly as on failure.
+- **[Parallel groups](https://zaier84.github.io/penstock/guides/parallel/)** — run independent steps concurrently, with an optional concurrency cap.
+- **[Composition](https://zaier84.github.io/penstock/guides/composition/)** — nest a whole pipeline as one step, with typed data flow in and out.
+- **[Lifecycle events](https://zaier84.github.io/penstock/guides/lifecycle-events/)** — `onComplete`, `onFailure`, `onCancel`, `onSettled`, fired after any
   rollback.
-- **Dry-run** — evaluate guards and report the plan without calling a single `run`.
-- **Tracing** — a four-method vendor-neutral interface, plus a ready-made `penstock/otel` adapter.
-- **Serialization** — `serializeResult()` produces a JSON-safe object, context excluded by default.
-- **Engines** — reusable, named bundles of domain functions, scoped per pipeline.
-- **Reusable steps** — `defineStep()` definitions that can declare the state they require.
+- **[Dry-run](https://zaier84.github.io/penstock/guides/dry-run/)** — evaluate guards and report the plan without calling a single `run`.
+- **[Tracing](https://zaier84.github.io/penstock/guides/tracing/)** — a four-method vendor-neutral interface, plus a ready-made `penstock/otel` adapter.
+- **[Serialization](https://zaier84.github.io/penstock/guides/serialization/)** — `serializeResult()` produces a JSON-safe object, context excluded by default.
+- **[Engines](https://zaier84.github.io/penstock/concepts/engines/)** — reusable, named bundles of domain functions, scoped per pipeline.
+- **[Reusable steps](https://zaier84.github.io/penstock/guides/define-step/)** — `defineStep()` definitions that can declare the state they require.
 
 ## Documentation
 
 - [Getting started](https://zaier84.github.io/penstock/getting-started/introduction/) — introduction,
   installation, and a five-stage tutorial.
+- [Core concepts](https://zaier84.github.io/penstock/concepts/steps/) — steps, pipelines, context, engines,
+  and results.
+- [Guides](https://zaier84.github.io/penstock/guides/rollback/) — fourteen pages, one feature each,
+  including [testing your pipelines](https://zaier84.github.io/penstock/guides/testing/).
 - [Why penstock](https://zaier84.github.io/penstock/why-penstock/) — the problem, the comparisons,
   and when to use something else.
 - [Migrating from the class API](https://zaier84.github.io/penstock/migrating/) — the typed-builder

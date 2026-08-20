@@ -96,14 +96,14 @@ property of that same literal, which is circular. Chaining is what makes
 
 Two of those differ in more than spelling.
 
-**`.parallel()` takes an array of `defineStep` definitions**, not `Step`
+**[`.parallel()`](../guides/parallel/) takes an array of [`defineStep`](../guides/define-step/) definitions**, not `Step`
 instances, and their contributions are intersected into the accumulated type so
 a later step sees all of them at once. It is an array rather than an object on
 purpose: declaration order decides rollback order and which failure becomes
 `result.error`, and JavaScript reorders integer-like keys in objects, so an
 object form would silently reorder a group containing a step named `"1"`.
 
-**`.compose()`'s `mapResult` returns a contribution** instead of writing onto
+**[`.compose()`](../guides/composition/)'s `mapResult` returns a contribution** instead of writing onto
 the outer context by hand. That is what lets the accumulated type follow it.
 Omitting `mapResult` runs the inner pipeline purely for its effects.
 

@@ -23,20 +23,20 @@ moment its step has run. There is no context interface to maintain and no
 
 ## The four concepts
 
-**Step** — the atomic unit. A named async function that receives the shared
+**[Step](../../concepts/steps/)** — the atomic unit. A named async function that receives the shared
 context and returns what it produces. It may declare a guard (`.when()`, a pure
 predicate that skips it) and a compensation (`.undo()`, run during rollback).
 
-**Pipeline** — an ordered, named chain of steps. It threads one context through
+**[Pipeline](../../concepts/pipelines/)** — an ordered, named chain of steps. It threads one context through
 them, evaluates guards, fires observer hooks, and owns error handling and the
 rollback chain. `execute()` builds a fresh context per call and resolves with a
 `Result`.
 
-**Engine** — a reusable, named bundle of domain functions that steps call via
+**[Engine](../../concepts/engines/)** — a reusable, named bundle of domain functions that steps call via
 `ctx.engines.<name>`. Engines sit outside the linear flow; they keep domain
 logic out of step wiring.
 
-**Context** — one mutable object created per `execute()` call and threaded by
+**[Context](../../concepts/context/)** — one mutable object created per `execute()` call and threaded by
 reference through every step. penstock owns `input`, `engines`, `logger`,
 `signal`, and `executionId`; your steps add to it by returning objects.
 
@@ -64,4 +64,6 @@ the better answer.
 
 [Installation](../installation/), then
 [Your first pipeline](../your-first-pipeline/), which builds one from two steps
-up to a working rollback.
+up to a working rollback. After that, the
+[core concepts](../../concepts/steps/) go a level deeper, and the
+[guides](../../guides/rollback/) cover one feature each.

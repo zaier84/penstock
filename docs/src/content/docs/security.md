@@ -58,13 +58,13 @@ The library logs step and pipeline **names**, statuses, durations, and error
 message/type. It never passes `ctx.input` or any context value to a logger.
 Your context may hold whatever it needs to; penstock will not surface it.
 
-The same rule governs trace attributes, which carry only names, ids, statuses,
+The same rule governs [trace attributes](../guides/tracing/), which carry only names, ids, statuses,
 counts, durations, and the idempotency key. The one caveat is the key itself:
 it is either library-generated or chosen by you, so **an idempotency key you
 derive from sensitive data will appear in your tracing backend**. Derive keys
 from identifiers, not from card numbers or personal details.
 
-`serializeResult()` follows the rule too — it **excludes `result.context` by
+[`serializeResult()`](../guides/serialization/) follows the rule too — it **excludes `result.context` by
 default**, because a serialized `Result` is destined for a log aggregator.
 `{ includeContext: true }` opts in, and means opting into whatever the context
 holds.

@@ -22,7 +22,7 @@ is an honest account of where it stands rather than a plan with dates.
 
 ## Under consideration
 
-- [ ] **Richer dry-run** that actually executes steps flagged as side-effect
+- [ ] **[Richer dry-run](../guides/dry-run/)** that actually executes steps flagged as side-effect
       free, rather than only planning. Today's dry-run evaluates guards and
       reports the plan without calling any `run`.
 - [ ] **DAG execution**, where steps declare dependencies on one another

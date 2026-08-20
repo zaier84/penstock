@@ -252,6 +252,12 @@ every run.
 
 From here:
 
+- [Core concepts](../../concepts/steps/) — steps, pipelines, context, engines,
+  and results, one page each.
+- [Rollback and compensation](../../guides/rollback/) — the reverse-order,
+  best-effort model in full.
+- [Testing your pipelines](../../guides/testing/) — asserting on a `Result`
+  instead of catching errors.
 - [Why penstock](../../why-penstock/) — the reasoning behind the design, and
   when to use something else.
 - [Migrating from the class API](../../migrating/) — if you have existing

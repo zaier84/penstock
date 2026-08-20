@@ -96,18 +96,18 @@ it.
 
 ## What penstock gives you
 
-- **Compensation declared next to the step it reverses.** `.undo()` chains onto
+- **[Compensation](../guides/rollback/) declared next to the step it reverses.** `.undo()` chains onto
   the step above it and sees that step's output as required, so there is no `!`
   and no `if (chargeId)`. Rollback runs in reverse order, best-effort: a failing
   compensation is recorded and the rest still run.
-- **A report of what happened.** `execute()` resolves with a `Result` — every
+- **[A report of what happened](../concepts/results/).** `execute()` resolves with a `Result` — every
   step's status, duration, attempt count, and idempotency key, plus the causal
   error. Failure is data you can inspect, log, and assert on.
-- **Reliability as policy.** Retry with fixed or exponential backoff,
+- **Reliability as policy.** [Retry](../guides/retry/) with fixed or exponential backoff,
   per-attempt timeouts, idempotency keys that stay stable across retries,
   parallel groups with a concurrency cap, and `AbortSignal` cancellation —
   configured per step rather than rewritten at each call site.
-- **Context types that accumulate.** Each step declares what it produces and the
+- **[Context types that accumulate](../guides/typed-builder/).** Each step declares what it produces and the
   context type grows down the chain. A field is required from the moment its
   step has run, so there is no shared interface of optional properties and no
   non-null assertions.
