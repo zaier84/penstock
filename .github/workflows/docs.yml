@@ -1,8 +1,13 @@
 # Builds and deploys the documentation site to GitHub Pages.
 #
 # Kept entirely separate from ci.yml: the library's gates run on a Node 20/22/24
-# matrix against the root project, which has no knowledge of the docs
-# toolchain. Nothing here installs anything at the repository root.
+# matrix against the root project, which has no knowledge of the docs toolchain.
+#
+# This workflow does install the root devDependencies, and has to. TypeDoc type
+# checks ../src through ../tsconfig.json, and TypeScript resolves @types from
+# the tsconfig's own directory upward — so docs/node_modules is never on that
+# path. Without a root install there is no @types/node, and every AbortSignal,
+# console, crypto and performance in the source is an unresolved name.
 #
 # Pull requests build but never deploy, so a docs change is verified before it
 # is published without granting PR runs any write permission.
@@ -14,11 +19,15 @@ on:
     paths:
       - 'docs/**'
       - 'src/**'
+      - 'package-lock.json'
+      - 'tsconfig.json'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'docs/**'
       - 'src/**'
+      - 'package-lock.json'
+      - 'tsconfig.json'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -43,9 +52,15 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: docs/package-lock.json
-      # The API reference is generated from ../src, so the build needs the
-      # library source — but not its dependencies, and never its lockfile.
+          cache-dependency-path: |
+            package-lock.json
+            docs/package-lock.json
+      # Type declarations only: TypeDoc needs @types/node, @opentelemetry/api
+      # and vitest resolvable from the repository root to type check ../src.
+      # --ignore-scripts because nothing here builds the library, so no
+      # postinstall needs to run inside the docs pipeline.
+      - name: Install library type dependencies
+        run: npm ci --ignore-scripts
       - name: Install
         run: npm ci
         working-directory: docs
