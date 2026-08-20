@@ -65,12 +65,24 @@ export default defineConfig({
         }),
       ],
       // Pages appear here only once they are written. A sidebar entry that
-      // leads to an empty page is worse than no entry at all.
+      // leads to an empty page is worse than no entry at all — Core concepts,
+      // Guides, and Recipes join as they are written.
       sidebar: [
         { label: 'Home', link: '/' },
+        { label: 'Why penstock', link: '/why-penstock/' },
         {
-          label: 'API reference',
-          items: [coreSidebar, otelSidebar],
+          label: 'Getting started',
+          items: [{ autogenerate: { directory: 'getting-started' } }],
+        },
+        {
+          label: 'Reference and meta',
+          items: [
+            { label: 'Migrating from the class API', link: '/migrating/' },
+            { label: 'Security model', link: '/security/' },
+            { label: 'Roadmap', link: '/roadmap/' },
+            coreSidebar,
+            otelSidebar,
+          ],
         },
       ],
     }),

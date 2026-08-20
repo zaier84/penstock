@@ -1,22 +1,44 @@
 ---
 title: penstock
 description: Composable, testable backend workflows for Node.js — pipelines, steps, and engines, with first-class reverse-order rollback.
+template: splash
 head:
   # Starlight appends the site title to every page title; on the home page,
   # whose title already is the site title, that renders as "penstock | penstock".
   - tag: title
     content: penstock — composable backend workflows for Node.js
+hero:
+  tagline: Multi-step backend operations that undo themselves when a later step fails. Zero runtime dependencies.
+  actions:
+    - text: Your first pipeline
+      link: ./getting-started/your-first-pipeline/
+      icon: right-arrow
+      variant: primary
+    - text: Why penstock
+      link: ./why-penstock/
+      icon: open-book
+      variant: minimal
 ---
 
-penstock turns sprawling sequential backend logic into a series of named,
-testable, composable **steps**. A pipeline threads one typed context through its
-steps in order, evaluating guards, firing observer hooks, and — when a step
-fails — walking backwards to undo the work that already happened.
+import { Card, CardGrid } from '@astrojs/starlight/components';
 
-Failure comes back as data. A structured `Result` tells you which steps ran,
-were skipped, failed, or rolled back, with timings and the causal error. The
-library has **zero runtime dependencies** and a deliberately small,
-prototype-pollution-safe surface.
+<CardGrid>
+  <Card title="Rollback that actually runs" icon="seti:shell">
+    Declare a step's compensation next to the step itself. When a later step
+    fails, completed steps unwind in reverse order — best-effort, so one
+    failing compensation never strands the others.
+  </Card>
+  <Card title="Reliability as policy" icon="setting">
+    Retry with backoff, per-attempt timeouts, idempotency keys stable across
+    retries, bounded-concurrency parallel groups, and `AbortSignal`
+    cancellation. Configuration, not boilerplate repeated per call site.
+  </Card>
+  <Card title="Types that accumulate" icon="seti:typescript">
+    Each step declares what it produces and the context type grows down the
+    chain, so a field is required from the moment its step has run. No context
+    interface to maintain, and no `ctx.total!`.
+  </Card>
+</CardGrid>
 
 ## Install
 
@@ -24,43 +46,59 @@ prototype-pollution-safe surface.
 npm install penstock
 ```
 
-Node `>=20` (22+ recommended). Dual ESM + CommonJS builds with bundled types.
-The optional `penstock/otel` adapter requires `@opentelemetry/api`, which you
-install only if you use it.
-
 ## A pipeline that undoes itself
-
-Each step declares what it **produces**, and the context type accumulates down
-the chain — so a key is required from the moment its step has run, with no
-non-null assertions anywhere.
 
 ```ts
 import { pipeline } from 'penstock';
 
-const checkout = pipeline<OrderInput>('checkout')
-  .step('reserve', async (ctx) => ({
+const checkout = pipeline<Order>('checkout')
+  .step('reserve-stock', async (ctx) => ({
     reservationId: await reserve(ctx.input.items),
   }))
-  .undo(async (ctx) => release(ctx.reservationId)) // required — no `!`
-  .step('charge', async (ctx) => ({
+  .undo(async (ctx) => release(ctx.reservationId))
+  .step('charge-card', async (ctx) => ({
+    // ctx.reservationId is a string here — no `!`, no optional chaining.
     chargeId: await charge(ctx.input.card, ctx.reservationId),
-  }));
+  }))
+  .undo(async (ctx) => refund(ctx.chargeId))
+  .step('ship', async (ctx) => {
+    throw new Error(`carrier rejected ${ctx.chargeId}`);
+  });
 
-const result = await checkout.execute(order);
-result.context.chargeId; // string
+const result = await checkout.execute({
+  items: [{ sku: 'A-1', qty: 2 }],
+  card: 'tok_visa',
+});
+
+console.log('ok:', result.ok);
+console.log('error:', result.error?.message);
+for (const step of result.steps) {
+  console.log(`  ${step.name}: ${step.status}`);
+}
 ```
 
-If `charge` throws, `reserve` is compensated before `execute` resolves, and
-`result.steps` records exactly what happened to each step.
+```text
+reserving 1 line item(s)
+charging tok_visa against rsv_1
+refunded chg_1
+released rsv_1
+ok: false
+error: Step "ship" failed
+  reserve-stock: rolled-back
+  charge-card: rolled-back
+  ship: failed
+```
+
+Shipping failed, so the charge was refunded and the stock released — in that
+order, without a single line of unwind logic. The failure came back as data:
+`result.steps` says exactly what happened to each step, and `result.error`
+carries the original throw as its `cause`.
 
 ## Where to go next
 
-The API reference is generated from the source, so it cannot drift from the
-implementation — one section per published entry point:
-
-- [`penstock`](./reference/penstock/) — the whole core surface: the typed
-  builder, `Step`, `Pipeline`, `Engine`, `Result`, and the error types.
-- [`penstock/otel`](./reference/otel/) — the optional OpenTelemetry adapter.
-
-Concept pages, guides, and a cookbook are being written and will appear in the
-sidebar as they land.
+- **[Why penstock](./why-penstock/)** — the problem it solves, and the cases
+  where you should reach for something else instead.
+- **[Your first pipeline](./getting-started/your-first-pipeline/)** — build one
+  from scratch, one step at a time.
+- **[API reference](./reference/penstock/)** — generated from the source, so it
+  cannot drift.
