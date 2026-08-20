@@ -353,7 +353,7 @@ class TypedPipelineBuilder {
  */
 
 /**
- * Starts a typed pipeline (0.5.0 spec, section 2.4). Each `.step()` declares
+ * Starts a typed pipeline. Each `.step()` declares
  * what it produces and the context type accumulates down the chain, so a key is
  * required from the moment its step has run:
  *
@@ -374,6 +374,10 @@ class TypedPipelineBuilder {
  * whatever the type parameters are, and {@link TypedPipeline} carries the state
  * accumulation, which exists only at compile time. Every method the interface
  * promises is exercised through it by the type tests.
+ *
+ * @param name - Name for the pipeline. Appears in `result.pipelineName`, in
+ * log lines, and in the pipeline's trace span. Must be a non-empty string and
+ * not one of the reserved names `__proto__`, `prototype`, or `constructor`.
  */
 export function pipeline<TInput>(name: string): TypedPipeline<TInput, {}, {}> {
   return new TypedPipelineBuilder(name) as unknown as TypedPipeline<

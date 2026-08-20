@@ -10,13 +10,20 @@ import type {
 } from './types';
 
 /**
- * The atomic unit of work in a pipeline (section 3.1): a named `run` function with an
+ * The atomic unit of work in a pipeline: a named `run` function with an
  * optional `when` guard and optional `undo` compensation. A `Step` is immutable
  * and reusable — its config is `readonly` and the fluent {@link Step.when} returns
- * a configured **clone** rather than mutating the original (section 2).
+ * a configured **clone** rather than mutating the original.
  *
  * The guard is stored as `guard` because the public `.when(fn)` method occupies
  * the `when` name; the constructor maps the `when` option key onto it.
+ *
+ * @param name - Name for the step, unique within its pipeline. Appears in
+ * `result.steps`, in log lines, in trace spans, and in the default idempotency
+ * key.
+ * @param fnOrOptions - Either the `run` function on its own, or a
+ * {@link StepOptions} object carrying `run` plus any of `when`, `undo`,
+ * `retry`, `timeout`, and `idempotencyKey`.
  */
 export class Step<TContext extends BaseContext = BaseContext> {
   readonly name: string;
@@ -102,7 +109,7 @@ export class Step<TContext extends BaseContext = BaseContext> {
 
   /**
    * Returns a **new** `Step` with the guard set, leaving the original untouched.
-   * If a guard was already present it is **replaced**, not combined (section 3.1).
+   * If a guard was already present it is **replaced**, not combined.
    */
   when(fn: GuardFn<TContext>): Step<TContext> {
     return new Step<TContext>(this.name, {

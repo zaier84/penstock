@@ -4,10 +4,15 @@ import type { EngineAccessor, EngineMethods } from './types';
 
 /**
  * A reusable, named bundle of domain functions invoked by steps via
- * `ctx.engines.<name>.<method>` (section 3.5). Engines are callable services, not part
+ * `ctx.engines.<name>.<method>`. Engines are callable services, not part
  * of the linear flow. A `Step` calls a method as `ctx.engines.pricing.total(...)`,
  * so the method runs with the bundle as its `this`; pure functions are
  * recommended. The instance is immutable: `name` and `methods` are `readonly`.
+ *
+ * @param name - Name steps reach the bundle by, as `ctx.engines.<name>`. Must
+ * be a non-empty, non-reserved string.
+ * @param methods - A non-empty record whose every value is a function.
+ * Anything else throws a `UsageError` at construction.
  */
 export class Engine {
   readonly name: string;
@@ -63,12 +68,12 @@ const globalRegistry = new Map<string, Engine>();
 
 /**
  * Registers an engine in the global registry. Re-registering an existing name
- * throws a `UsageError` — no silent override (section 3.5). The registry is
+ * throws a `UsageError` — no silent override. The registry is
  * process-wide shared mutable state; `Pipeline.useEngine` is the isolated,
  * recommended alternative for apps that want no globals.
  *
- * @deprecated Use `pipeline.useEngine(engine)` instead (0.5.0 spec, section 4).
- * The global registry is process-wide mutable state: it leaks between tests
+ * @deprecated Use `pipeline.useEngine(engine)` instead. The global registry
+ * is process-wide mutable state: it leaks between tests
  * unless every suite remembers `clearEngines()`, and two pipelines cannot use
  * different engines under the same name. Pipeline-scoped registration has
  * neither problem. Still fully supported; removal is a 1.0 decision.
@@ -86,11 +91,11 @@ export function registerEngine(engine: Engine): void {
 
 /**
  * Empties the global registry. Required for test isolation — suites that call
- * `registerEngine` must invoke this in `afterEach` (section 3.5).
+ * `registerEngine` must invoke this in `afterEach`.
  *
- * @deprecated Deprecated alongside {@link registerEngine} (0.5.0 spec, section
- * 4). It exists only to undo global registration; `pipeline.useEngine(engine)`
- * needs no teardown at all. Still fully supported; removal is a 1.0 decision.
+ * @deprecated Deprecated alongside {@link registerEngine}. It exists only to
+ * undo global registration; `pipeline.useEngine(engine)` needs no teardown at
+ * all. Still fully supported; removal is a 1.0 decision.
  */
 export function clearEngines(): void {
   globalRegistry.clear();

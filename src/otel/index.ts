@@ -9,7 +9,7 @@ import {
 import type { TraceSpan, Tracer } from '../types';
 
 /**
- * Options for {@link otelTracer} (0.4.0 spec, section 1.9). Both configure the
+ * Options for {@link otelTracer}. Both configure the
  * OpenTelemetry *instrumentation scope*, which is how a backend attributes
  * spans to the library that produced them.
  */
@@ -28,8 +28,7 @@ export interface OtelTracerOptions {
 const PENSTOCK_VERSION = '0.5.0';
 
 /**
- * Adapts penstock's vendor-neutral {@link Tracer} onto OpenTelemetry (0.4.0
- * spec, section 1.9):
+ * Adapts penstock's vendor-neutral {@link Tracer} onto OpenTelemetry:
  *
  * ```ts
  * import { Pipeline } from 'penstock';
@@ -46,8 +45,12 @@ const PENSTOCK_VERSION = '0.5.0';
  * Spans are started with the parent supplied through the context rather than
  * through `SpanOptions`, which is what lets an ambient active span parent a
  * root pipeline span. The adapter does not contain its own errors — the core
- * already wraps every tracer call (section 1.8), so a failing OTel SDK cannot
+ * already wraps every tracer call, so a failing OTel SDK cannot
  * affect a pipeline either way.
+ *
+ * @param options - Instrumentation scope for the emitted spans. Defaults to
+ * the name `'penstock'` and the penstock version.
+ * @returns A {@link Tracer} to pass as `execute(input, { tracer })`.
  */
 export function otelTracer(options: OtelTracerOptions = {}): Tracer {
   const tracer = trace.getTracer(

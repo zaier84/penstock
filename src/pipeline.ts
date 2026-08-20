@@ -39,16 +39,17 @@ import type {
 } from './types';
 
 /**
- * Options for {@link Pipeline.execute} (section 3.2). `logger` selects the run logger
- * (default no-op), `throwOnError` rethrows a failure as a {@link PipelineError}
- * (section 1.7), and `dryRun` switches to planning instead of execution (section 1.2).
+ * Options for {@link Pipeline.execute}. `logger` selects the run logger
+ * (default no-op), `throwOnError` rethrows a failure as a
+ * {@link PipelineError}, and `dryRun` switches to planning instead of
+ * execution.
  */
 export interface ExecuteOptions {
   throwOnError?: boolean;
   dryRun?: boolean;
   logger?: Logger;
   /**
-   * Pipeline-level cancellation signal (section 1.3). It is bound to
+   * Pipeline-level cancellation signal. It is bound to
    * `ctx.signal` for the whole run and folded into every invocation's
    * `meta.signal`, so steps can forward either into their own async work, and
    * it is checked between entries — an aborted signal stops the pipeline,
@@ -56,7 +57,7 @@ export interface ExecuteOptions {
    */
   signal?: AbortSignal;
   /**
-   * Tracer for this run (0.4.0 spec, section 1.8). Omitted, no spans are
+   * Tracer for this run. Omitted, no spans are
    * emitted at all; supplied, the run produces a pipeline span with a step
    * span per step, attempt spans for retrying steps, and a compensation span
    * per `undo`. Dry-run never emits spans. Every call penstock makes on the
@@ -65,7 +66,7 @@ export interface ExecuteOptions {
    */
   tracer?: Tracer;
   /**
-   * Parent for this run's pipeline span (0.4.0 spec, section 1.8). Exported
+   * Parent for this run's pipeline span. Exported
    * because {@link Pipeline.asStep} sets it — nesting an inner pipeline's span
    * under the wrapping step's span — but usable directly to graft a penstock
    * run onto a span your own code already started.
@@ -193,17 +194,16 @@ type ParallelSlot =
 type RunMode = 'sequential' | 'parallel';
 
 /**
- * An ordered, named collection of steps (section 3.2). It threads one context through
- * its entries — sequential steps and parallel groups (0.3.0 spec, section 1.1)
- * — evaluates guards, fires observer hooks, and — when a step fails —
- * performs best-effort, reverse-order rollback (section 1.7) before returning
- * a structured {@link Result}. The instance holds only immutable config; every
- * piece of per-run state lives in {@link Pipeline.execute}-local variables, so
- * a pipeline is safe to `execute` repeatedly and concurrently (section 3.2
- * re-entrancy).
+ * An ordered, named collection of steps. It threads one context through its
+ * entries — sequential steps and parallel groups — evaluates guards, fires
+ * observer hooks, and — when a step fails — performs best-effort,
+ * reverse-order rollback before returning a structured {@link Result}. The
+ * instance holds only immutable config; every piece of per-run state lives in
+ * {@link Pipeline.execute}-local variables, so a pipeline is safe to `execute`
+ * repeatedly and concurrently.
  *
- * Pipeline-scoped engines (section 3.5) shadow the global registry, and `dryRun`
- * planning is available via {@link Pipeline.execute} (section 1.2).
+ * Pipeline-scoped engines shadow the global registry, and `dryRun`
+ * planning is available via {@link Pipeline.execute}.
  */
 export class Pipeline<TContext extends BaseContext = BaseContext> {
   readonly name: string;
@@ -233,7 +233,9 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 
   /**
    * Appends a sequential step. Throws a `UsageError` synchronously if `step` is
-   * not a `Step` or its name duplicates one already in this pipeline (section 3.2).
+   * not a `Step` or its name duplicates one already in this pipeline.
+   *
+   * @param step - The step to append. Its name must be unique in this pipeline.
    */
   addStep(step: Step<TContext>): this {
     if (!(step instanceof Step)) {
@@ -254,16 +256,20 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   }
 
   /**
-   * Inserts a parallel group (0.3.0 spec, section 1.1): the given steps run
+   * Inserts a parallel group: the given steps run
    * concurrently, occupying one logical position in the pipeline. Requires at
    * least 2 steps, each a `Step` whose name is unique across the whole
    * pipeline. The group is validated in full before any of it is registered,
    * so a throwing call leaves the pipeline unchanged. Chainable.
    *
-   * `options.concurrency` caps how many of the group's steps run at once
-   * (0.4.0 spec, section 1.5); it must be an integer `>= 1`. Omitting it — or
-   * setting it at or above the group size — runs everything at once, which is
-   * exactly the 0.3.0 behaviour.
+   * `options.concurrency` caps how many of the group's steps run at once; it
+   * must be an integer `>= 1`. Omitting it — or setting it at or above the
+   * group size — runs everything at once.
+   *
+   * @param steps - The group's steps, in declaration order. That order decides
+   * rollback order, dispatch order under a concurrency cap, and which failure
+   * becomes `result.error`.
+   * @param options - `concurrency` caps how many run at once.
    */
   addParallel(steps: Step<TContext>[], options?: ParallelOptions): this {
     if (!Array.isArray(steps) || steps.length < 2) {
@@ -314,31 +320,33 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   }
 
   /**
-   * Wraps this whole pipeline as a single `Step` of an outer pipeline (0.3.0
-   * spec, section 1.2). The returned step is a **regular `Step`** — usable
-   * with `.when()`, `addStep`, or inside `addParallel` — whose `run`:
+   * Wraps this whole pipeline as a single `Step` of an outer pipeline. The
+   * returned step is a **regular `Step`** — usable with `.when()`,
+   * `addStep`, or inside `addParallel` — whose `run`:
    *
    * 1. derives the inner input via `mapInput(outerCtx)`;
    * 2. executes this pipeline on its **own fresh, isolated context**, with
-   *    the outer run's logger and the wrapping step's own `meta.signal` (so an
-   *    outer cancel — or, inside a parallel group, a peer failure, or the
-   *    wrapping step's own timeout — propagates into the inner run, which
-   *    `ctx.signal` alone no longer carries: 0.4.0 spec, section 1.3),
-   *    resolving engines from this pipeline's own `useEngine`
-   *    registrations plus the global registry — never the outer pipeline's
-   *    scoped engines;
+   * the outer run's logger and the wrapping step's own `meta.signal`,
+   * resolving engines from this pipeline's own `useEngine` registrations plus
+   * the global registry — never the outer pipeline's scoped engines;
    * 3. on inner success calls `mapResult(innerResult, outerCtx)`;
    * 4. on inner failure throws the inner `result.error` — the inner pipeline
    *    has already rolled its own completed steps back inside `execute`, so
    *    the outer pipeline wraps that error in its usual `StepError` and rolls
-   *    back only *outer* steps (section 1.2.4, scenario A). If the outer run
+   *    back only *outer* steps. If the outer run
    *    was cancelled, the wrapping step is classified `'cancelled'` like any
-   *    other step whose run ends under an aborted signal (section 1.3).
+   *    other step whose run ends under an aborted signal.
    *
    * Either way the inner `Result` is surfaced as `innerResult` on the
-   * wrapping step's report (section 1.2.5). During **outer** rollback the
+   * wrapping step's report. During **outer** rollback the
    * wrapping step is compensated only by `options.undo`, if given — the inner
-   * pipeline is never re-rolled-back (section 1.2.4, scenario B).
+   * pipeline is never re-rolled-back.
+   *
+   * @param name - Name for the wrapping step in the outer pipeline.
+   * @param options - `mapInput` (required) derives the inner input from the
+   * outer context; `mapResult` runs only on inner success; `undo` compensates
+   * the wrapping step during outer rollback; `when` guards it.
+   * @returns A regular `Step` for the outer pipeline.
    */
   asStep<TOuterContext extends BaseContext>(
     name: string,
@@ -394,19 +402,19 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
     return new Step<TOuterContext>(name, stepOptions);
   }
 
-  /** Registers a `before` observer hook; multiple are allowed (section 3.2). */
+  /** Registers a `before` observer hook; multiple are allowed. */
   before(hook: BeforeHook<TContext>): this {
     this.beforeHooks.push(hook);
     return this;
   }
 
-  /** Registers an `after` observer hook; multiple are allowed (section 3.2). */
+  /** Registers an `after` observer hook; multiple are allowed. */
   after(hook: AfterHook<TContext>): this {
     this.afterHooks.push(hook);
     return this;
   }
 
-  /** Registers an `onError` observer hook; multiple are allowed (section 3.2). */
+  /** Registers an `onError` observer hook; multiple are allowed. */
   onError(hook: ErrorHook<TContext>): this {
     this.errorHooks.push(hook);
     return this;
@@ -414,8 +422,8 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 
   /**
    * Registers a lifecycle callback fired when a run **succeeds**
-   * (`result.ok === true`) — before the `onSettled` callbacks (0.3.0 spec,
-   * section 1.3). Multiple are allowed; they run in registration order.
+   * (`result.ok === true`) — before the `onSettled` callbacks. Multiple are
+   * allowed; they run in registration order.
    */
   onComplete(callback: LifecycleCallback<TContext>): this {
     this.completeCallbacks.push(callback);
@@ -425,8 +433,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   /**
    * Registers a lifecycle callback fired when a run fails because a **step
    * (or guard) failed** — not a cancellation (`result.aborted` separates the
-   * two). Fires after rollback is complete, before `onSettled` (0.3.0 spec,
-   * section 1.3).
+   * two). Fires after rollback is complete, before `onSettled`.
    */
   onFailure(callback: LifecycleCallback<TContext>): this {
     this.failureCallbacks.push(callback);
@@ -436,7 +443,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   /**
    * Registers a lifecycle callback fired when a run was **stopped by its
    * `AbortSignal`** (`result.aborted === true`). Fires after rollback is
-   * complete, before `onSettled` (0.3.0 spec, section 1.3).
+   * complete, before `onSettled`.
    */
   onCancel(callback: LifecycleCallback<TContext>): this {
     this.cancelCallbacks.push(callback);
@@ -446,7 +453,7 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   /**
    * Registers a lifecycle callback fired **always**, last — after the
    * outcome-specific `onComplete` / `onFailure` / `onCancel` callbacks: the
-   * `finally` of the family (0.3.0 spec, section 1.3).
+   * `finally` of the family.
    */
   onSettled(callback: LifecycleCallback<TContext>): this {
     this.settledCallbacks.push(callback);
@@ -455,8 +462,8 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 
   /**
    * Registers an engine scoped to this pipeline; during resolution it shadows a
-   * global engine of the same name (section 3.5). The scoped store is a `Map`, never a
-   * user-keyed plain object (section 1.10). Chainable.
+   * global engine of the same name. The scoped store is a `Map`, never a
+   * user-keyed plain object. Chainable.
    */
   useEngine(engine: Engine): this {
     this.engines.set(engine.name, engine);
@@ -466,11 +473,19 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   /**
    * Builds a fresh context for this call, runs each entry in order, and resolves
    * with a {@link Result}. On a step failure the flow aborts, `onError` fires
-   * per originating failure, completed steps are compensated in reverse order
-   * (section 1.7), and the `Result` carries `ok:false` with the failure and any
-   * rollback errors. With `{ throwOnError: true }` the same failure is thrown as
-   * a {@link PipelineError} instead. With `{ dryRun: true }` it plans instead of
-   * executing (section 1.2). Per section 3.2 all run state is local to this method.
+   * per originating failure, completed steps are compensated in reverse
+   * order, and the `Result` carries `ok:false` with the failure and any
+   * rollback errors. With `{ throwOnError: true }` the same failure is thrown
+   * as a {@link PipelineError} instead. With `{ dryRun: true }` it plans
+   * instead of executing. All run state is local to this method, so concurrent
+   * calls never share anything.
+   *
+   * @param input - Payload for this run, exposed to every step as `ctx.input`
+   * and pinned non-writable.
+   * @param options - `throwOnError`, `dryRun`, `logger`, `signal`, `tracer`,
+   * and `parentSpan`.
+   * @returns The run's {@link Result}. It resolves even when a step fails,
+   * unless `throwOnError` is set.
    */
   async execute(
     input: TContext['input'],
@@ -857,15 +872,14 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
    *    guard-skipped keep their reports; steps cleared to run never started
    *    and get none — same as steps after a sequential failure).
    * 2. **Concurrent execution** of the cleared steps, through a bounded pool
-   *    of at most `concurrency` slots (0.4.0 spec, section 1.5; unbounded when
-   *    the option is omitted). Every step's runs are driven by a signal
-   *    combining two cancellation levels: a group-scoped `AbortController`
-   *    (aborted as soon as any peer fails) and the pipeline signal (external
-   *    cancellation). `before` hooks fire per step at dispatch (declaration
-   *    order — dispatching is sequential; only the runs overlap); `after`
-   *    hooks fire per step as it completes (completion order).
-   *    `Promise.allSettled` — never `Promise.all` — waits for every dispatched
-   *    step to settle before anything is classified or rolled back.
+   * of at most `concurrency` slots. Every step's runs are driven by a signal
+   * combining two cancellation levels: a group-scoped `AbortController`
+   * (aborted as soon as any peer fails) and the pipeline signal (external
+   * cancellation). `before` hooks fire per step at dispatch (declaration order
+   * — dispatching is sequential; only the runs overlap); `after` hooks fire
+   * per step as it completes (completion order). `Promise.allSettled` — never
+   * `Promise.all` — waits for every dispatched step to settle before anything
+   * is classified or rolled back.
    * 3. **Classification, in declaration order,** so `result.steps[]` and the
    *    rollback registration are deterministic regardless of completion
    *    order: completed steps join the rollback list (their reverse walk thus
@@ -1683,8 +1697,8 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
   }
 
   /**
-   * Fires the lifecycle callbacks for a finished run (0.3.0 spec, section
-   * 1.3): the one outcome family — `onComplete` for success, `onCancel` for a
+   * Fires the lifecycle callbacks for a finished run: the one outcome family
+   * — `onComplete` for success, `onCancel` for a
    * signal-aborted run, `onFailure` for a step failure (`result.aborted` is
    * what separates those two) — then, always, `onSettled`, last. By the time
    * this runs, rollback has already completed; under `throwOnError` the
@@ -1780,9 +1794,9 @@ export class Pipeline<TContext extends BaseContext = BaseContext> {
 }
 
 /**
- * Resolves the idempotency key for one step invocation (0.4.0 spec, section
- * 1.4). Called **once, before the first attempt**, and the result reused for
- * every retry — a key that changed between attempts would tell the downstream
+ * Resolves the idempotency key for one step invocation. Called **once, before
+ * the first attempt**, and the result reused for every retry — a key that
+ * changed between attempts would tell the downstream
  * service each retry is a new operation, which is exactly what the key exists
  * to prevent.
  *
@@ -1878,8 +1892,8 @@ function cancelledSkipReason(pipelineSignal: AbortSignal): string {
 }
 
 /**
- * Per-run tracing handles for pipeline-as-step nesting (0.4.0 spec, section
- * 1.8), keyed by the outer run's context and then by wrapping-step name — the
+ * Per-run tracing handles for pipeline-as-step nesting, keyed by the outer
+ * run's context and then by wrapping-step name — the
  * same shape and lifetime as {@link innerResults}, and for the same reasons:
  * one context per `execute` keeps it re-entrancy-safe, and name-keying keeps
  * concurrent wrapping steps inside a parallel group apart. Present only when

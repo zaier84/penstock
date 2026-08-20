@@ -109,9 +109,9 @@ function wrapRun(spec: StepSpec): RunFn<ErasedCtx> {
 declare const BRAND: unique symbol;
 
 /**
- * A reusable step definition created by {@link defineStep} (0.5.0 spec, section
- * 2.5): a named unit of work that declares what prior state it **requires** and
- * what it **produces**, independently of any one pipeline.
+ * A reusable step definition created by {@link defineStep}: a named unit of
+ * work that declares what prior state it **requires** and what it **produces**,
+ * independently of any one pipeline.
  *
  * Modifiers return a **new** definition rather than mutating this one,
  * mirroring `Step.prototype.when`. A definition is therefore safe to share
@@ -212,7 +212,7 @@ function makeDef(spec: StepSpec): StepDef<unknown, never, never> {
 }
 
 /**
- * Defines a reusable, independently-typed step (0.5.0 spec, section 2.5).
+ * Defines a reusable, independently-typed step.
  *
  * The call is in **two stages** because TypeScript has no partial type-argument
  * inference: supplying `TInput` explicitly would force you to supply the run
@@ -234,6 +234,10 @@ function makeDef(spec: StepSpec): StepDef<unknown, never, never> {
  *
  * `use(callApi)` before the step that produces `token` does not compile. The
  * name is validated here, at definition time, because the `Step` is built now.
+ *
+ * @returns The second-stage call, `(name, run)`, which builds the definition.
+ * Its `name` must be unique within whichever pipeline uses it, and its `run`
+ * receives the context plus this invocation's {@link StepMeta}.
  */
 export function defineStep<TInput, TRequires extends object = {}>(): <
   TRun extends (ctx: TypedCtx<TInput, TRequires>, meta: StepMeta) => StepReturn,

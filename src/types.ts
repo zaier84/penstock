@@ -3,14 +3,14 @@ import type { Step } from './step';
 
 /**
  * Per-invocation metadata handed to a step's `run` and `undo` as a second
- * argument (0.4.0 spec, section 1.2). It identifies *this* invocation — which
+ * argument. It identifies *this* invocation — which
  * execution, which attempt, under which idempotency key, and with which
  * `AbortSignal` — none of which the shared context can express, since one
  * context is threaded through every step of a run and shared by the concurrent
  * steps of a parallel group.
  *
  * Guards deliberately receive no metadata: they are contractually pure
- * predicates that dry-run relies on evaluating safely (section 1.2), and an
+ * predicates that dry-run relies on evaluating safely, and an
  * attempt number or an idempotency key would invite side-effectful guards.
  */
 export interface StepMeta {
@@ -24,13 +24,13 @@ export interface StepMeta {
   readonly attempt: number;
   /** Total attempts permitted for this step (`1` when no retry is configured). */
   readonly maxAttempts: number;
-  /** Stable across every attempt of this step within this execution (section 1.4). */
+  /** Stable across every attempt of this step within this execution. */
   readonly idempotencyKey: string;
   /**
    * This invocation's own signal: the per-attempt timeout combined with the
    * parallel group's signal (when inside a group) and the pipeline signal,
    * created fresh per attempt. Prefer it over `ctx.signal` inside a step —
-   * `ctx.signal` answers only "was the whole pipeline cancelled" (section 1.3).
+   * `ctx.signal` answers only "was the whole pipeline cancelled".
    * For `undo` it is the pipeline signal: a compensation must be allowed to
    * finish, so it is not bound by the step's timeout.
    */
@@ -51,8 +51,7 @@ export type RunFn<TContext extends BaseContext> = (
 /**
  * A step's optional guard — a pure predicate over the context. A falsy result
  * skips the step. Guards must not mutate the context or cause side effects;
- * dry-run (section 1.2) relies on this contract. Guards take the context alone
- * (0.4.0 spec, section 1.2).
+ * dry-run relies on this contract. Guards take the context alone.
  */
 export type GuardFn<TContext extends BaseContext> = (
   ctx: TContext,
@@ -60,9 +59,9 @@ export type GuardFn<TContext extends BaseContext> = (
 
 /**
  * A step's optional compensation, run in reverse order during rollback when a
- * later step fails (section 1.7). Like `run` it receives the context and this
+ * later step fails. Like `run` it receives the context and this
  * invocation's {@link StepMeta} — whose `idempotencyKey` is the undo key and
- * whose `signal` is the pipeline signal (0.4.0 spec, section 1.2).
+ * whose `signal` is the pipeline signal.
  */
 export type UndoFn<TContext extends BaseContext> = (
   ctx: TContext,
@@ -70,7 +69,7 @@ export type UndoFn<TContext extends BaseContext> = (
 ) => void | Promise<void>;
 
 /**
- * Per-step retry policy (section 1.1). `attempts` is the **total** number of
+ * Per-step retry policy. `attempts` is the **total** number of
  * tries including the first — `attempts: 3` means try once, then up to two more
  * times — so the minimum is `1` (no retry). Only a step's `run` is retried;
  * guards (`when`) and compensations (`undo`) are never retried.
@@ -92,20 +91,20 @@ export interface RetryOptions {
   jitter?: boolean;
 }
 
-/** Full configuration form accepted by the `Step` constructor (section 3.1). */
+/** Full configuration form accepted by the `Step` constructor. */
 export interface StepOptions<TContext extends BaseContext> {
   run: RunFn<TContext>;
   when?: GuardFn<TContext>;
   undo?: UndoFn<TContext>;
-  /** Per-step retry policy (section 1.1); validated at construction. */
+  /** Per-step retry policy; validated at construction. */
   retry?: RetryOptions;
   /**
-   * Per-attempt timeout in milliseconds; must be `> 0` (section 1.2). Validated
+   * Per-attempt timeout in milliseconds; must be `> 0`. Validated
    * at construction.
    */
   timeout?: number;
   /**
-   * Overrides this step's idempotency key (0.4.0 spec, section 1.4), which
+   * Overrides this step's idempotency key, which
    * defaults to `` `${executionId}:${stepName}` ``. A string is used verbatim; a
    * function is evaluated **once per step invocation, before the first attempt**,
    * and its result reused for every retry — re-evaluating per attempt would
@@ -125,7 +124,7 @@ export type StepStatus =
   | 'rollback-failed'
   | 'would-run';
 
-/** Per-step entry in a `Result`, in pipeline order (section 3.4). */
+/** Per-step entry in a `Result`, in pipeline order. */
 export interface StepReport {
   name: string;
   status: StepStatus;
@@ -136,15 +135,15 @@ export interface StepReport {
   /** Present for `'skipped'` (e.g. "guard returned false"). */
   skipReason?: string;
   /**
-   * Number of times `run` was called (section 1.4); present when retry is
+   * Number of times `run` was called; present when retry is
    * configured. A step that succeeded on its 3rd try reports `attempts: 3`.
    */
   attempts?: number;
-  /** `true` when the step failed specifically due to a timeout (section 1.4). */
+  /** `true` when the step failed specifically due to a timeout. */
   timedOut?: boolean;
   /**
    * The nested pipeline's full `Result`, present only for pipeline-as-step
-   * entries whose inner pipeline ran (0.3.0 spec, section 1.2.5) — the outer
+   * entries whose inner pipeline ran — the outer
    * `steps[]` stays flat, so the nested execution is inspectable here without
    * needing `mapResult`.
    */
@@ -152,14 +151,14 @@ export interface StepReport {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   innerResult?: Result<any>;
   /**
-   * The idempotency key this step's `run` was invoked with (0.4.0 spec,
-   * section 1.4), making retry-safety auditable from the `Result`. Present for
-   * every step that ran; absent for skipped and would-run entries.
+   * The idempotency key this step's `run` was invoked with, making
+   * retry-safety auditable from the `Result`. Present for every step that ran;
+   * absent for skipped and would-run entries.
    */
   idempotencyKey?: string;
 }
 
-/** The structured outcome of `pipeline.execute()` (section 3.4). */
+/** The structured outcome of `pipeline.execute()`. */
 export interface Result<TContext extends BaseContext> {
   /** `false` iff a step's run (or a guard) threw and the pipeline aborted. */
   ok: boolean;
@@ -172,34 +171,33 @@ export interface Result<TContext extends BaseContext> {
   /** `undo()` failures gathered during compensation (possibly empty). */
   rollbackErrors: Error[];
   /**
-   * `true` when the pipeline was stopped by its `AbortSignal` (section 1.3.3
-   * of the 0.3.0 spec) — detected between entries, during a retry delay, or
-   * mid-parallel-group. `false` for step/guard failures, successful runs, and
-   * dry-run plans.
+   * `true` when the pipeline was stopped by its `AbortSignal` — detected
+   * between entries, during a retry delay, or mid-parallel-group. `false` for
+   * step/guard failures, successful runs, and dry-run plans.
    */
   aborted: boolean;
   /**
-   * Unique id for this `execute()` call (0.4.0 spec, section 1.1), equal to
+   * Unique id for this `execute()` call, equal to
    * `context.executionId`. A pipeline run via `asStep` is a separate execution
    * with its own id, correlated through `StepReport.innerResult`.
    */
   executionId: string;
-  /** The pipeline's name, so a `Result` is self-describing once detached (section 1.7). */
+  /** The pipeline's name, so a `Result` is self-describing once detached. */
   pipelineName: string;
   /**
    * Total wall-clock time for the `execute()` call in milliseconds, measured
-   * with `performance.now()` and including any rollback (section 1.7).
+   * with `performance.now()` and including any rollback.
    */
   durationMs: number;
 }
 
 /**
- * Options for `serializeResult` (0.4.0 spec, section 1.6).
+ * Options for `serializeResult`.
  */
 export interface SerializeOptions {
   /**
    * Include `result.context` in the output. Default `false` — a security
-   * decision matching the log-hygiene invariant (section 1.10): a serialized
+   * decision matching the log-hygiene invariant: a serialized
    * `Result` is destined for a log aggregator, and contexts routinely hold
    * PII, tokens, and payment details. Opting in means opting into that.
    */
@@ -211,7 +209,7 @@ export interface SerializeOptions {
 }
 
 /**
- * A JSON-safe rendering of a thrown value (0.4.0 spec, section 1.6). Anything
+ * A JSON-safe rendering of a thrown value. Anything
  * that is not an `Error` — `throw 'boom'`, `throw 42`, `throw null` — becomes
  * `{ name: 'UnknownError', message: String(value) }` rather than crashing the
  * serializer.
@@ -232,7 +230,7 @@ export interface SerializedError {
   [key: string]: unknown;
 }
 
-/** A JSON-safe rendering of a {@link StepReport} (0.4.0 spec, section 1.6). */
+/** A JSON-safe rendering of a {@link StepReport}. */
 export interface SerializedStepReport {
   name: string;
   status: StepStatus;
@@ -247,7 +245,7 @@ export interface SerializedStepReport {
 }
 
 /**
- * A JSON-safe rendering of a {@link Result} (0.4.0 spec, section 1.6),
+ * A JSON-safe rendering of a {@link Result},
  * produced by `serializeResult` and guaranteed to survive `JSON.stringify`.
  */
 export interface SerializedResult {
@@ -264,20 +262,20 @@ export interface SerializedResult {
 }
 
 /**
- * One span in a trace (0.4.0 spec, section 1.8) — deliberately the smallest
+ * One span in a trace — deliberately the smallest
  * vendor-neutral surface penstock needs, so the core stays
  * zero-runtime-dependency and never imports an OpenTelemetry package. The
- * optional `penstock/otel` adapter (section 1.9) maps this onto a real OTel
+ * optional `penstock/otel` adapter maps this onto a real OTel
  * span; any other backend needs only these four methods.
  *
- * Every call penstock makes on a span is contained the way hooks are (section
- * 1.8): a throw is caught, logged at `warn`, and never alters the run.
+ * Every call penstock makes on a span is contained the way hooks are: a throw
+ * is caught, logged at `warn`, and never alters the run.
  */
 export interface TraceSpan {
   /**
    * Records one attribute. penstock only ever writes `penstock.*` keys whose
    * values are names, ids, statuses, counts, durations, and the idempotency
-   * key — never `ctx.input` or any context value (section 1.8, section 1.10).
+   * key — never `ctx.input` or any context value.
    */
   setAttribute(key: string, value: string | number | boolean): void;
   /** Records a thrown value on the span. May receive a non-`Error`. */
@@ -289,7 +287,7 @@ export interface TraceSpan {
 }
 
 /**
- * Starts spans for one execution (0.4.0 spec, section 1.8), supplied per run
+ * Starts spans for one execution, supplied per run
  * as `execute(input, { tracer })`. Omitting it emits no spans at all, and
  * dry-run never emits spans whether or not a tracer is supplied.
  */
@@ -299,8 +297,7 @@ export interface Tracer {
 }
 
 /**
- * Options for a parallel group, passed as `addParallel(steps, options)` (0.4.0
- * spec, section 1.5).
+ * Options for a parallel group, passed as `addParallel(steps, options)`.
  */
 export interface ParallelOptions {
   /**
@@ -324,7 +321,7 @@ export type PipelineEntry<TContext extends BaseContext> =
   | { kind: 'parallel'; steps: Step<TContext>[]; concurrency?: number };
 
 /**
- * Options for `Pipeline.asStep(name, options)` (0.3.0 spec, section 1.2.2),
+ * Options for `Pipeline.asStep(name, options)`,
  * which wraps a whole pipeline as a single `Step` of an outer pipeline. The
  * inner pipeline runs on its **own fresh context**, isolated from the outer
  * one — `mapInput` is the only way in, `mapResult` (and `innerResult` on the
@@ -346,8 +343,7 @@ export interface AsStepOptions<
   /**
    * Compensation for the wrapping step, run during **outer** rollback when a
    * later outer step fails. The inner pipeline is *not* re-rolled-back — its
-   * work is committed; reversing its net effect is this function's job
-   * (0.3.0 spec, section 1.2.4, scenario B).
+   * work is committed; reversing its net effect is this function's job.
    */
   undo?: UndoFn<TOuterContext>;
   /** Guard on the wrapping step, evaluated in the outer pipeline's context. */
@@ -355,11 +351,11 @@ export interface AsStepOptions<
 }
 
 /**
- * A pipeline-scoped lifecycle callback (0.3.0 spec, section 1.3), registered
+ * A pipeline-scoped lifecycle callback, registered
  * via `onComplete` / `onFailure` / `onCancel` / `onSettled` and fired once a
  * run has fully settled — after execution and any rollback — with the final
  * `Result`. `Result.aborted` decides `onCancel` vs `onFailure`; `onSettled`
- * always fires last. Lifecycle callbacks are observers (section 1.8): async
+ * always fires last. Lifecycle callbacks are observers: async
  * ones are awaited, and a throw/rejection is contained and logged at `warn`,
  * never altering the `Result` or stopping the remaining callbacks.
  */
@@ -372,15 +368,14 @@ export type EngineMethods = Record<string, (...args: unknown[]) => unknown>;
 
 /**
  * Resolver behind `ctx.engines`: indexed by engine name, each entry is that
- * engine's `EngineMethods`. The concrete Map-backed implementation — which
- * throws a `UsageError` on an unknown name rather than returning `undefined`
- * (section 3.5) — lands in `engine.ts` in Phase 5; this is its public type contract.
+ * engine's `EngineMethods`. The concrete implementation is `Map`-backed and
+ * throws a `UsageError` on an unknown name rather than returning `undefined`.
  */
 export type EngineAccessor = Record<string, EngineMethods>;
 
 /**
- * Observer hook fired immediately before an executed step's `run` (section 3.2). Skipped
- * steps fire no hook. A throw/rejection is contained and never alters flow (section 1.8).
+ * Observer hook fired immediately before an executed step's `run`. Skipped
+ * steps fire no hook. A throw/rejection is contained and never alters flow.
  */
 export type BeforeHook<TContext extends BaseContext> = (
   ctx: TContext,
@@ -388,9 +383,9 @@ export type BeforeHook<TContext extends BaseContext> = (
 ) => void | Promise<void>;
 
 /**
- * Observer hook fired after an executed step completes (section 3.2). Receives just the
+ * Observer hook fired after an executed step completes. Receives just the
  * step's outcome — `{ status, durationMs }`, not the full `StepReport`. Skipped
- * steps fire no hook; a throw/rejection is contained (section 1.8).
+ * steps fire no hook; a throw/rejection is contained.
  */
 export type AfterHook<TContext extends BaseContext> = (
   ctx: TContext,
@@ -399,8 +394,8 @@ export type AfterHook<TContext extends BaseContext> = (
 ) => void | Promise<void>;
 
 /**
- * Observer hook fired once when a step fails, before rollback begins (section 1.7, section 3.2).
- * Observes only; a throw/rejection is contained and never alters flow (section 1.8).
+ * Observer hook fired once when a step fails, before rollback begins.
+ * Observes only; a throw/rejection is contained and never alters flow.
  */
 export type ErrorHook<TContext extends BaseContext> = (
   error: Error,

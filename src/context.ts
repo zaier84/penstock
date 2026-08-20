@@ -3,7 +3,7 @@ import type { EngineAccessor } from './types';
 
 /**
  * The single mutable object threaded by reference through every step of a
- * pipeline run (section 3.3). Users extend it with their own working fields, declared
+ * pipeline run. Users extend it with their own working fields, declared
  * optional since they do not exist until the step that sets them runs.
  */
 export interface BaseContext<TInput = unknown> {
@@ -11,14 +11,14 @@ export interface BaseContext<TInput = unknown> {
   readonly input: TInput;
   /** Resolver for engines invoked by steps via `ctx.engines.<name>`. */
   readonly engines: EngineAccessor;
-  /** Logger for this run; defaults to a no-op (section 3.7). */
+  /** Logger for this run; defaults to a no-op. */
   readonly logger: Logger;
   /**
-   * The **pipeline-level** cancellation signal for this run (0.4.0 spec,
-   * section 1.3): the caller's `execute(input, { signal })` when supplied,
-   * otherwise a never-aborting signal. It is set once when the context is
-   * created and never reassigned, so it is safe to read from any step,
-   * sequential or parallel.
+   * The **pipeline-level** cancellation signal for this run: the caller's
+   * `execute(input, { signal })` when supplied, otherwise a never-aborting
+   * signal. It is set once when the context is created and never
+   * reassigned, so it is safe to read from any step, sequential or
+   * parallel.
    *
    * It answers only "was the whole pipeline cancelled". A step's own timeout
    * does **not** abort it — one shared field cannot be the per-attempt timeout
@@ -28,7 +28,7 @@ export interface BaseContext<TInput = unknown> {
    */
   readonly signal: AbortSignal;
   /**
-   * Unique identifier for this `execute()` call (0.4.0 spec, section 1.1),
+   * Unique identifier for this `execute()` call,
    * also surfaced as `result.executionId`. It is the correlation id for logs,
    * traces, and idempotency keys.
    */

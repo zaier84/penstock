@@ -54,19 +54,18 @@ export default defineConfig({
           tsconfig: '../tsconfig.json',
           output: 'reference/penstock',
           sidebar: { label: 'penstock', collapsed: true },
-          typeDoc,
+          typeDoc: { ...typeDoc, name: 'penstock' },
         }),
         starlightOtelTypeDoc({
           entryPoints: ['../src/otel/index.ts'],
           tsconfig: '../tsconfig.json',
           output: 'reference/otel',
           sidebar: { label: 'penstock/otel', collapsed: true },
-          typeDoc,
+          typeDoc: { ...typeDoc, name: 'penstock/otel' },
         }),
       ],
       // Pages appear here only once they are written. A sidebar entry that
-      // leads to an empty page is worse than no entry at all — Recipes join
-      // as they are written.
+      // leads to an empty page is worse than no entry at all.
       sidebar: [
         { label: 'Home', link: '/' },
         { label: 'Why penstock', link: '/why-penstock/' },
@@ -81,6 +80,10 @@ export default defineConfig({
         {
           label: 'Guides',
           items: [{ autogenerate: { directory: 'guides' } }],
+        },
+        {
+          label: 'Recipes',
+          items: [{ autogenerate: { directory: 'recipes' } }],
         },
         {
           label: 'Reference and meta',

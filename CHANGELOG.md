@@ -195,3 +195,42 @@ Both remain fully functional and emit no runtime warnings; removal is a `1.0` de
   returns `ok: false` like any other failure, instead of making `execute()` reject.
 
 [0.5.0]: https://github.com/zaier84/penstock/releases/tag/v0.5.0
+
+## [0.5.1] - 2026-08-20
+
+### Changed
+
+- `README.md` rewritten as a concise entry point: 159 lines, down from 1,197.
+  It is now one runnable example, four reasons, a feature list, and links —
+  every section it lost has a documented destination on the new site. Because
+  the README _is_ the npmjs.com package page, this release exists mainly to put
+  it there.
+- **New documentation site** at
+  [zaier84.github.io/penstock](https://zaier84.github.io/penstock), built with
+  Astro Starlight and deployed by GitHub Actions. It carries a positioning page
+  that says plainly when _not_ to use penstock, a three-page getting-started
+  tutorial, five core-concept pages, fourteen feature guides, eight cookbook
+  recipes, and an API reference generated from the source so it cannot drift.
+  Every code sample on it was executed and shows real output. The site lives in
+  `docs/` with its own `package.json` and lockfile, so the library's own
+  dependency surface is untouched.
+
+### Fixed
+
+- TSDoc across the public API no longer refers readers to internal specification
+  documents they cannot see. 144 citations of the form `(section 3.3)`,
+  `(0.4.0 spec, section 1.1)`, and `PENSTOCK_0.3.0_SPEC.md section 1.2`
+  appeared in the generated reference; none remain. Comments on private methods
+  keep their pointers, which are useful to maintainers.
+- The TSDoc for `EngineAccessor` claimed its implementation "lands in
+  `engine.ts` in Phase 5". It landed in `0.1.0`; the sentence now describes
+  what the type actually is.
+- Added `@param` documentation to the most-used public API — `pipeline()`,
+  `defineStep()`, `serializeResult()`, `otelTracer()`, the `Engine` and
+  `Step` constructors, `Pipeline.execute`/`addStep`/`addParallel`/`asStep`,
+  and the `TypedPipeline` methods — which previously rendered as bare names and
+  types with no description.
+
+No behaviour changed in this release. Every edit to `src/` is a comment.
+
+[0.5.1]: https://github.com/zaier84/penstock/releases/tag/v0.5.1

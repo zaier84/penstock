@@ -31,13 +31,13 @@ import type { ProducesOf, RequiresOf, StepDef } from './define';
 
 /**
  * What a step's `run` may return: nothing, or an object merged into the
- * context (0.5.0 spec, section 2.2).
+ * context.
  *
  * The constraint is `object` rather than `Record<string, unknown>` on purpose.
  * An `interface` has no implicit index signature, so a step returning a named
  * domain interface — the normal case — is *not* assignable to
  * `Record<string, unknown>` and would fail to compile. `object` accepts it
- * while still excluding primitives (section 2.1).
+ * while still excluding primitives.
  */
 export type StepReturn = void | object;
 
@@ -47,7 +47,7 @@ export type StepReturn = void | object;
  *
  * The `[T] extends [void]` bracket form is deliberate — it prevents
  * distribution over unions, so a run typed `Promise<A | void>` is judged as a
- * whole rather than being split into two branches. Keep it (section 2.2).
+ * whole rather than being split into two branches. Keep it.
  */
 export type StateOf<T> = [T] extends [void]
   ? {}
@@ -96,8 +96,7 @@ export type TypedCtx<TInput, TState> = BaseContext<TInput> & TState;
 
 /**
  * A pipeline built by {@link pipeline}, where each step declares what it
- * produces and the context type accumulates down the chain (0.5.0 spec,
- * section 2.4).
+ * produces and the context type accumulates down the chain.
  *
  * The three type parameters carry the accumulation:
  *
@@ -110,7 +109,7 @@ export type TypedCtx<TInput, TState> = BaseContext<TInput> & TState;
  * weaken `TLast` to `Partial<TLast>` because it still knows exactly which keys
  * the guarded step contributed, and `.undo()` can offer `Merge<TPrev, TLast>`
  * with those keys **required**, because a compensation only ever runs for a
- * step that completed (section 2.3).
+ * step that completed.
  *
  * This is a facade: it constructs the same {@link Step} and {@link Pipeline}
  * instances the class API does, so rollback, retry, timeout, cancellation,
@@ -132,7 +131,12 @@ export interface TypedPipeline<
    * The run **function type** is inferred and its return extracted with
    * `Awaited<ReturnType<TRun>>`, rather than constraining the return type
    * directly. Constraining it collapses inference to the constraint and every
-   * contribution degrades to the constraint type (section 2.1).
+   * contribution degrades to the constraint type.
+   *
+   * @param name - Name for the step, unique within this pipeline.
+   * @param run - The work. Whatever object it returns is merged onto the
+   * context and added to the accumulated type; returning nothing contributes
+   * nothing.
    */
   step<
     TRun extends (
@@ -149,30 +153,38 @@ export interface TypedPipeline<
   >;
 
   /**
-   * Appends a reusable step definition created by `defineStep` (0.5.0 spec,
-   * section 2.5). Its contribution becomes the new `TLast`, exactly as if the
-   * step had been declared inline.
+   * Appends a reusable step definition created by `defineStep`. Its
+   * contribution becomes the new `TLast`, exactly as if the step had been
+   * declared inline.
    *
    * A definition may declare a **required prior state**, and the conditional in
    * the parameter type enforces it: if the state accumulated so far does not
    * satisfy `RequiresOf<TDef>`, the parameter resolves to `never` and the call
    * fails to compile. Composing steps in the wrong order is therefore a type
    * error rather than a runtime `undefined`.
+   *
+   * @param def - A definition from `defineStep`. Does not compile if the state
+   * accumulated so far does not satisfy what it declares it requires.
    */
   use<TDef extends StepDef<TInput, any, any>>(
     def: Merge<TPrev, TLast> extends RequiresOf<TDef> ? TDef : never,
   ): TypedPipeline<TInput, Merge<TPrev, TLast>, ProducesOf<TDef>>;
 
   /**
-   * Appends a parallel group (`PENSTOCK_0.3.0_SPEC.md` section 1.1). Every
+   * Appends a parallel group. Every
    * definition's contribution is intersected into the new `TLast`, so a later
    * step sees all of them.
    *
-   * It takes an **array**, not an object, and deliberately (0.5.0 spec, section
-   * 1.2): declaration order defines rollback order and which failure becomes
-   * `result.error`, and JavaScript reorders integer-like keys in objects — so
-   * an object form would silently reorder a group containing a step named
-   * `"1"`. Modifiers belong on the individual `StepDef`s, not on the group.
+   * It takes an **array**, not an object, and deliberately: declaration order
+   * defines rollback order and which failure becomes `result.error`, and
+   * JavaScript reorders integer-like keys in objects — so an object form would
+   * silently reorder a group containing a step named `"1"`. Modifiers belong on
+   * the individual `StepDef`s, not on the group.
+   *
+   * @param defs - At least two definitions. Declaration order decides rollback
+   * order, dispatch order under a cap, and which failure becomes
+   * `result.error`.
+   * @param options - `concurrency` caps how many run at once.
    */
   parallel<TDefs extends readonly StepDef<TInput, any, any>[]>(
     defs: TDefs,
@@ -188,10 +200,10 @@ export interface TypedPipeline<
   >;
 
   /**
-   * Nests another pipeline as a single step (`PENSTOCK_0.3.0_SPEC.md` section
-   * 1.2). `mapInput` derives the inner pipeline's input from the outer context;
-   * `mapResult` turns the inner `Result` into a contribution, which is merged
-   * on the outer context exactly like a step's return.
+   * Nests another pipeline as a single step. `mapInput` derives the inner
+   * pipeline's input from the outer context; `mapResult` turns the inner
+   * `Result` into a contribution, which is merged on the outer context exactly
+   * like a step's return.
    *
    * That is the one place this differs from the class API's `asStep`, whose
    * `mapResult` returns `void` and writes onto the outer context by hand. Here
@@ -201,6 +213,12 @@ export interface TypedPipeline<
    *
    * The inner pipeline may be another typed pipeline or a class-API
    * {@link Pipeline}; the overloads accept either.
+   *
+   * @param name - Name for the wrapping step in this pipeline.
+   * @param inner - The pipeline to nest. It runs on its own fresh context and
+   * resolves its own engines.
+   * @param options - `mapInput` derives the inner input; `mapResult` turns the
+   * inner `Result` into a contribution for this pipeline.
    */
   compose<
     TInner extends TypedPipeline<any, any, any>,
@@ -250,7 +268,10 @@ export interface TypedPipeline<
    *
    * The predicate sees `TPrev`, the state *before* the guarded step, since it
    * is evaluated before that step runs. Guards must stay pure: dry-run
-   * evaluates them without executing anything (`BUILD_SPEC.md` section 1.2).
+   * evaluates them without executing anything.
+   *
+   * @param fn - Pure predicate over the state before the guarded step. A falsy
+   * result skips it.
    */
   when(
     fn: (ctx: TypedCtx<TInput, TPrev>) => boolean | Promise<boolean>,
@@ -258,10 +279,13 @@ export interface TypedPipeline<
 
   /**
    * Compensation for the most recent step, run during reverse-order rollback
-   * when a later step fails (`BUILD_SPEC.md` section 1.7). It sees
+   * when a later step fails. It sees
    * `Merge<TPrev, TLast>` with the step's own output **required** — a
    * compensation only runs for a step that completed, so `ctx.reservationId`
    * needs no `!`.
+   *
+   * @param fn - The compensation. It sees the guarded step's own output as
+   * required, plus this invocation's {@link StepMeta}.
    */
   undo(
     fn: (
@@ -270,23 +294,23 @@ export interface TypedPipeline<
     ) => void | Promise<void>,
   ): TypedPipeline<TInput, TPrev, TLast>;
 
-  /** Retry policy for the most recent step (`PENSTOCK_0.2.0_SPEC.md` section 1.1). */
+  /** Retry policy for the most recent step. */
   retry(options: RetryOptions): TypedPipeline<TInput, TPrev, TLast>;
 
-  /** Per-attempt timeout in milliseconds for the most recent step (section 1.2). */
+  /** Per-attempt timeout in milliseconds for the most recent step. */
   timeout(ms: number): TypedPipeline<TInput, TPrev, TLast>;
 
   /**
-   * Idempotency key for the most recent step (`PENSTOCK_0.4.0_SPEC.md` section
-   * 1.4). A function is evaluated once, before the first attempt, so it sees
-   * `TPrev` — the state before this step ran.
+   * Idempotency key for the most recent step. A function is evaluated once,
+   * before the first attempt, so it sees `TPrev` — the state before this step
+   * ran.
    */
   idempotencyKey(
     key: string | ((ctx: TypedCtx<TInput, TPrev>) => string),
   ): TypedPipeline<TInput, TPrev, TLast>;
 
   /**
-   * Observer hook fired before each executed step (`BUILD_SPEC.md` section 3.2).
+   * Observer hook fired before each executed step.
    *
    * It sees `Partial<...>` of the accumulated state, and that is type-honest
    * rather than pessimistic: the hook fires for *every* step, so at any given
@@ -298,37 +322,37 @@ export interface TypedPipeline<
     hook: BeforeHook<TypedCtx<TInput, Partial<Merge<TPrev, TLast>>>>,
   ): this;
 
-  /** Observer hook fired after each executed step completes (section 3.2). */
+  /** Observer hook fired after each executed step completes. */
   after(hook: AfterHook<TypedCtx<TInput, Partial<Merge<TPrev, TLast>>>>): this;
 
-  /** Observer hook fired once per step failure, before rollback (section 1.7). */
+  /** Observer hook fired once per step failure, before rollback. */
   onError(
     hook: ErrorHook<TypedCtx<TInput, Partial<Merge<TPrev, TLast>>>>,
   ): this;
 
-  /** Lifecycle callback for a successful run (`PENSTOCK_0.3.0_SPEC.md` section 1.3). */
+  /** Lifecycle callback for a successful run. */
   onComplete(
     callback: LifecycleCallback<TypedCtx<TInput, Merge<TPrev, TLast>>>,
   ): this;
 
-  /** Lifecycle callback for a run that failed on a step, after rollback (section 1.3). */
+  /** Lifecycle callback for a run that failed on a step, after rollback. */
   onFailure(
     callback: LifecycleCallback<TypedCtx<TInput, Merge<TPrev, TLast>>>,
   ): this;
 
-  /** Lifecycle callback for a run stopped by its `AbortSignal` (section 1.3). */
+  /** Lifecycle callback for a run stopped by its `AbortSignal`. */
   onCancel(
     callback: LifecycleCallback<TypedCtx<TInput, Merge<TPrev, TLast>>>,
   ): this;
 
-  /** Lifecycle callback fired always, last (section 1.3). */
+  /** Lifecycle callback fired always, last. */
   onSettled(
     callback: LifecycleCallback<TypedCtx<TInput, Merge<TPrev, TLast>>>,
   ): this;
 
   /**
    * Registers a pipeline-scoped engine, shadowing a global one of the same
-   * name (`BUILD_SPEC.md` section 3.5). This is the recommended alternative to
+   * name. This is the recommended alternative to
    * the deprecated global registry.
    */
   useEngine(engine: Engine): this;
@@ -371,7 +395,7 @@ export type InnerCtxOf<T> =
     : never;
 
 /**
- * Options for {@link TypedPipeline.compose} (0.5.0 spec, section 2.4).
+ * Options for {@link TypedPipeline.compose}.
  *
  * Deliberately **not** `AsStepOptions`. There, `mapResult` returns `void` and
  * writes onto the outer context by hand; here it **returns** a contribution,

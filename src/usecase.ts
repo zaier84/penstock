@@ -5,7 +5,7 @@ import { Pipeline } from './pipeline';
 import type { Result } from './types';
 
 /**
- * Aggregate outcome of a {@link UseCase} run (section 3.6): each executed pipeline's
+ * Aggregate outcome of a {@link UseCase} run: each executed pipeline's
  * {@link Result} in order, up to and including a failing one. `ok` is `false`
  * once any pipeline returns `ok:false`, and `error` carries that pipeline's
  * failure. Deliberately minimal — the pipeline is the centerpiece.
@@ -18,14 +18,14 @@ export interface UseCaseResult {
 
 /**
  * A thin, named composition that runs one or more pipelines **sequentially** on
- * the **same input**, short-circuiting on the first failure (section 3.6). Pipelines do
- * not share mutable state — each builds its own fresh context per run (section 3.3), so
- * cross-pipeline data flow is intentionally out of scope for the MVP (section 8). Like
+ * the **same input**, short-circuiting on the first failure. Pipelines do
+ * not share mutable state — each builds its own fresh context per run, so
+ * cross-pipeline data flow is intentionally out of scope for the MVP. Like
  * `Pipeline`, the instance holds only immutable config; all run state is
  * `execute`-local, so a `UseCase` is safe to run repeatedly and concurrently.
  *
  * @deprecated Use `Pipeline.asStep()` — or `compose()` on the typed builder —
- * instead (0.5.0 spec, section 4). Both nest one pipeline inside another while
+ * instead. Both nest one pipeline inside another while
  * letting data flow between them, which a `UseCase` cannot: it runs each
  * pipeline on the same input with its own isolated context, so nothing one
  * pipeline produces can reach the next. Still fully supported; removal is a
@@ -44,7 +44,7 @@ export class UseCase<TInput = unknown> {
 
   /**
    * Appends a pipeline; throws a `UsageError` synchronously if `pipeline` is not
-   * a `Pipeline` (section 3.6). The method generic accepts a pipeline over any context
+   * a `Pipeline`. The method generic accepts a pipeline over any context
    * that shares this use-case's input type — which a plain parameter type cannot,
    * since `Pipeline` is effectively invariant in its context — and the stored
    * array is widened through a single bridge cast. Chainable.
@@ -65,8 +65,8 @@ export class UseCase<TInput = unknown> {
   /**
    * Runs each pipeline in order on the same `input`, collecting their Results.
    * Stops at the first pipeline returning `ok:false` and surfaces its error;
-   * otherwise resolves `ok:true` with every Result (section 3.6). Each pipeline.execute
-   * builds its own isolated context (section 3.3).
+   * otherwise resolves `ok:true` with every Result. Each pipeline.execute
+   * builds its own isolated context.
    */
   async execute(input: TInput): Promise<UseCaseResult> {
     const pipelines: Result<BaseContext>[] = [];

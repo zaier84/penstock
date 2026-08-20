@@ -36,21 +36,26 @@ interface Walker {
 
 /**
  * Flattens a {@link Result} into a plain object that survives
- * `JSON.stringify` (0.4.0 spec, section 1.6): live `Error` instances become
+ * `JSON.stringify`: live `Error` instances become
  * `{ name, message, stack?, cause? }` plus their custom fields, circular
  * references become `'[Circular]'`, and values JSON cannot hold become
  * `'[Unserializable]'`.
  *
  * It is a **standalone function, not `Result.toJSON()`**: attaching a method
  * would make `Result` non-plain, which risks breaking users' deep-equality
- * assertions and structured-clone usage. It is pure — no I/O, no telemetry
- * (section 1.10) — and never mutates the `Result` it is given.
+ * assertions and structured-clone usage. It is pure — no I/O, no telemetry —
+ * and never mutates the `Result` it is given.
  *
  * **`context` is excluded by default.** That is the same security decision as
- * the log-hygiene invariant (section 1.10): a serialized `Result` is destined
+ * the log-hygiene invariant: a serialized `Result` is destined
  * for a log aggregator, and contexts routinely hold PII, tokens, and payment
  * details. `{ includeContext: true }` opts in, best-effort and with the same
  * circular guard.
+ *
+ * @param result - The `Result` to flatten. It is never mutated.
+ * @param options - `includeContext` (default `false`), `includeStacks`
+ * (default `true`), and `maxCauseDepth` (default `5`).
+ * @returns A plain object guaranteed to survive `JSON.stringify`.
  */
 export function serializeResult<TContext extends BaseContext>(
   result: Result<TContext>,
