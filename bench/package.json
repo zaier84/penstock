@@ -1,0 +1,13 @@
+{
+  "name": "penstock-bench",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Benchmark suite for penstock. Dependency-isolated from the library: tinybench lives here, never in the root package.json, so the root npm ci stays fast across the Node 20/22/24 matrix and `dependencies: {}` stays trivially verifiable.",
+  "scripts": {
+    "bench": "node index.mjs"
+  },
+  "devDependencies": {
+    "tinybench": "^5.0.1"
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "environment": {
+    "node": "v22.22.3",
+    "v8": "12.4.254.21-node.56",
+    "os": "win32 10.0.26200 (x64)",
+    "cpu": "Intel(R) Core(TM) i7-10810U CPU @ 1.10GHz",
+    "cores": 12,
+    "memoryGB": 32,
+    "date": "2026-08-20",
+    "target": "../dist/index.js (built ESM output)",
+    "batchSize": 20
+  },
+  "scenarios": [
+    {
+      "scenario": "1. baseline: five plain sequential awaits",
+      "opsPerSec": 1851859.907407121,
+      "nsPerOp": 539.9976510103016,
+      "nsPerOpMedian": 430.000000005748,
+      "nsPerOpP99": 1660.000000015316,
+      "rmePercent": 1.0467660232724596,
+      "samples": 185186
+    },
+    {
+      "scenario": "2. typed builder: five sequential steps",
+      "opsPerSec": 38043.27144967846,
+      "nsPerOp": 26285.85718036223,
+      "nsPerOpMedian": 19954.999999981737,
+      "nsPerOpP99": 112427.39999998051,
+      "rmePercent": 3.1908902592979085,
+      "samples": 3809
+    },
+    {
+      "scenario": "3. class API: five sequential steps",
+      "opsPerSec": 45124.96723169005,
+      "nsPerOp": 22160.6809123116,
+      "nsPerOpMedian": 15750.000000025466,
+      "nsPerOpP99": 127599.49999997397,
+      "rmePercent": 5.163572345944641,
+      "samples": 4516
+    },
+    {
+      "scenario": "4. five steps with before/after hooks",
+      "opsPerSec": 27636.02179466272,
+      "nsPerOp": 36184.65810419674,
+      "nsPerOpMedian": 21424.999999999272,
+      "nsPerOpP99": 154881.19999998523,
+      "rmePercent": 8.403523287136611,
+      "samples": 2764
+    },
+    {
+      "scenario": "5. parallel group of five",
+      "opsPerSec": 23703.50906906483,
+      "nsPerOp": 42187.84641068559,
+      "nsPerOpMedian": 28989.999999976135,
+      "nsPerOpP99": 173497.9999999996,
+      "rmePercent": 14.234305391490325,
+      "samples": 2396
+    },
+    {
+      "scenario": "6. parallel group of five, concurrency 2",
+      "opsPerSec": 22569.67951055118,
+      "nsPerOp": 44307.230837394316,
+      "nsPerOpMedian": 31434.99999996493,
+      "nsPerOpP99": 202989.60000000443,
+      "rmePercent": 3.692868329950638,
+      "samples": 2257
+    },
+    {
+      "scenario": "7. five steps with retry configured",
+      "opsPerSec": 34356.94566752844,
+      "nsPerOp": 29106.196158325085,
+      "nsPerOpMedian": 19499.999999970896,
+      "nsPerOpP99": 187082.24999997584,
+      "rmePercent": 4.2142907476680485,
+      "samples": 3436
+    },
+    {
+      "scenario": "8. five steps with a no-op tracer",
+      "opsPerSec": 13187.567623615663,
+      "nsPerOp": 75828.99504600439,
+      "nsPerOpMedian": 21795.00000002008,
+      "nsPerOpP99": 207115.99999997258,
+      "rmePercent": 111.32703155000627,
+      "samples": 1413
+    },
+    {
+      "scenario": "9. rollback: fifth step fails, four undos",
+      "opsPerSec": 18074.893842488622,
+      "nsPerOp": 55325.35951327701,
+      "nsPerOpMedian": 40830.000000096334,
+      "nsPerOpP99": 246110.00000000987,
+      "rmePercent": 4.6640477396260325,
+      "samples": 1808
+    },
+    {
+      "scenario": "10. serializeResult on a twenty-step Result",
+      "opsPerSec": 1278897.0980990818,
+      "nsPerOp": 781.9237384199034,
+      "nsPerOpMedian": 370.0000001117587,
+      "nsPerOpP99": 950.0000000116415,
+      "rmePercent": 4.528759042912327,
+      "samples": 127915
+    }
+  ],
+  "derived": {
+    "perStepOverheadUs": 3.904999999995198,
+    "perStepClassApiUs": 3.0640000000039436,
+    "builderFacadeUs": 0.8409999999912543,
+    "note": "Per-step overhead is (scenario 2 - scenario 1) / 5. Steps do no real work, so this is orchestration cost only."
+  }
+}

@@ -89,6 +89,7 @@ export default defineConfig({
           label: 'Reference and meta',
           items: [
             { label: 'Migrating from the class API', link: '/migrating/' },
+            { label: 'Performance', link: '/performance/' },
             { label: 'Security model', link: '/security/' },
             { label: 'Roadmap', link: '/roadmap/' },
             coreSidebar,
