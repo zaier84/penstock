@@ -225,12 +225,17 @@ Both remain fully functional and emit no runtime warnings; removal is a `1.0` de
 - The TSDoc for `EngineAccessor` claimed its implementation "lands in
   `engine.ts` in Phase 5". It landed in `0.1.0`; the sentence now describes
   what the type actually is.
+- `otelTracer()` reported `0.5.0` as its default OpenTelemetry instrumentation
+  scope version. That literal is kept in step with `package.json` by hand, and
+  had been missed; it now reads `0.5.1`. It affects only the scope a backend
+  attributes penstock's spans to — no span, attribute, or timing changes.
 - Added `@param` documentation to the most-used public API — `pipeline()`,
   `defineStep()`, `serializeResult()`, `otelTracer()`, the `Engine` and
   `Step` constructors, `Pipeline.execute`/`addStep`/`addParallel`/`asStep`,
   and the `TypedPipeline` methods — which previously rendered as bare names and
   types with no description.
 
-No behaviour changed in this release. Every edit to `src/` is a comment.
+No behaviour changed in this release. Apart from that one version literal,
+every edit to `src/` is a comment.
 
 [0.5.1]: https://github.com/zaier84/penstock/releases/tag/v0.5.1

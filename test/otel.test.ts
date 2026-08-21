@@ -156,7 +156,7 @@ describe('penstock/otel adapter (0.4.0 section 1.9)', () => {
 
     it('defaults the instrumentation scope to penstock and the package version', () => {
       otelTracer().startSpan('s');
-      expect(harness.scopes).toEqual([{ name: 'penstock', version: '0.5.0' }]);
+      expect(harness.scopes).toEqual([{ name: 'penstock', version: '0.5.1' }]);
     });
 
     it('honours a custom scope name and version', () => {
@@ -166,7 +166,7 @@ describe('penstock/otel adapter (0.4.0 section 1.9)', () => {
 
     it('honours a custom name while keeping the default version', () => {
       otelTracer({ name: 'my-app' }).startSpan('s');
-      expect(harness.scopes).toEqual([{ name: 'my-app', version: '0.5.0' }]);
+      expect(harness.scopes).toEqual([{ name: 'my-app', version: '0.5.1' }]);
     });
   });
 
